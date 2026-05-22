@@ -1,0 +1,3 @@
+[submodule "dilang-zed/tree-sitter-dilang"]
+	path = dilang-zed/tree-sitter-dilang
+	url = git@github.com:HappyEmu/tree-sitter-dilang

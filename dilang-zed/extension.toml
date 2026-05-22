@@ -1,0 +1,16 @@
+id = "dilang"
+name = "Dilang"
+description = "Syntax highlighting for the Dilang capability-native language."
+version = "0.1.0"
+schema_version = 1
+authors = ["HappyEmu"]
+repository = "https://github.com/HappyEmu/dilang"
+
+# Grammar source is in HappyEmu/tree-sitter-dilang, also tracked as a git
+# submodule at ./tree-sitter-dilang. When iterating on the grammar:
+#   1. push grammar commits to HappyEmu/tree-sitter-dilang
+#   2. bump `commit` below to the new SHA
+#   3. bump the submodule pointer in the dilang repo
+[grammars.dilang]
+repository = "https://github.com/HappyEmu/tree-sitter-dilang"
+commit = "ff65adfc780bc417849970a71283d88d4117c65f"

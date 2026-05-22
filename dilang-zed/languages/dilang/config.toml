@@ -1,0 +1,14 @@
+name = "Dilang"
+grammar = "dilang"
+path_suffixes = ["di"]
+line_comments = ["// "]
+autoclose_before = ";:.,=}])>"
+word_characters = ["_"]
+
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "<", end = ">", close = false, newline = false, not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+]
