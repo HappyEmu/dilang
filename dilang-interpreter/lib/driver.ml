@@ -24,20 +24,93 @@ let parse_file path =
 let build_tables prog =
   let fns = Hashtbl.create 16 in
   let caps = Hashtbl.create 8 in
+  let structs = Hashtbl.create 8 in
+  let impls_by_ty : (Ast.ident, Ast.impl_decl list) Hashtbl.t = Hashtbl.create 8 in
   List.iter (function
-    | Ast.DFn f  -> Hashtbl.replace fns f.name f
-    | Ast.DCap c -> Hashtbl.replace caps c.c_name c
+    | Ast.DFn f     -> Hashtbl.replace fns f.name f
+    | Ast.DCap c    -> Hashtbl.replace caps c.c_name c
+    | Ast.DStruct s -> Hashtbl.replace structs s.s_name s
+    | Ast.DImpl i   ->
+        let prev = try Hashtbl.find impls_by_ty i.for_ty with Not_found -> [] in
+        Hashtbl.replace impls_by_ty i.for_ty (i :: prev)
   ) prog;
-  fns, caps
+  fns, caps, structs, impls_by_ty
+
+(* BFS closure of the `extends` relation, including the cap itself. *)
+let compute_ext_of (cap_decls : (Ast.ident, Ast.cap_decl) Hashtbl.t)
+  : (Ast.ident, Ast.ident list) Hashtbl.t =
+  let ext_of = Hashtbl.create 16 in
+  Hashtbl.iter (fun name _ ->
+    let seen = Hashtbl.create 4 in
+    let order = ref [] in
+    let rec visit chain c =
+      if List.mem c chain then
+        failwith ("capability extends cycle involving " ^ c)
+      else if Hashtbl.mem seen c then ()
+      else begin
+        Hashtbl.add seen c ();
+        order := c :: !order;
+        match Hashtbl.find_opt cap_decls c with
+        | None -> failwith ("unknown capability in extends: " ^ c)
+        | Some d -> List.iter (visit (c :: chain)) d.c_extends
+      end
+    in
+    visit [] name;
+    Hashtbl.replace ext_of name (List.rev !order)
+  ) cap_decls;
+  ext_of
+
+(* For struct `ty`, collect every (method_name, impl_method) from all
+   `impl ... for ty` blocks. Panic on duplicate method names. *)
+let methods_for_ty impls_by_ty (ty : Ast.ident)
+  : (Ast.ident * Ast.impl_method) list =
+  let impls = try Hashtbl.find impls_by_ty ty with Not_found -> [] in
+  let acc = ref [] in
+  List.iter (fun (i : Ast.impl_decl) ->
+    List.iter (fun (m : Ast.impl_method) ->
+      if List.mem_assoc m.im_name !acc then
+        failwith ("duplicate method " ^ m.im_name ^ " on struct " ^ ty);
+      acc := (m.im_name, m) :: !acc
+    ) i.methods
+  ) impls;
+  List.rev !acc
+
+let make_user_constructor (s : Ast.struct_decl) methods
+  : (Ast.ident * Value.value) list -> Value.impl_value =
+  fun args ->
+    (* Reject unknown fields. *)
+    List.iter (fun (fname, _) ->
+      if not (List.mem_assoc fname s.s_fields) then
+        failwith (Printf.sprintf "struct %s has no field %s" s.s_name fname)
+    ) args;
+    (* Look up each declared field; reject duplicates and missing fields. *)
+    let fields =
+      List.map (fun (fname, _ty) ->
+        match List.filter (fun (n, _) -> n = fname) args with
+        | []        -> failwith (Printf.sprintf "struct %s is missing field %s" s.s_name fname)
+        | [(_, v)]  -> (fname, ref v)
+        | _         -> failwith (Printf.sprintf "struct %s: field %s given more than once" s.s_name fname)
+      ) s.s_fields
+    in
+    let dispatch =
+      List.map (fun (mname, m) -> (mname, Value.DUser m)) methods
+    in
+    { Value.ty = s.s_name; methods = dispatch; fields; cap_env = [] }
 
 let run_program ?(sink = Value.OutChan stdout) prog =
-  let fns, cap_decls = build_tables prog in
+  let fns, cap_decls, struct_decls, impls_by_ty = build_tables prog in
   let main =
     match Hashtbl.find_opt fns "main" with
     | Some f -> f
     | None   -> failwith "no `main` function defined"
   in
   let host_constructors = Hashtbl.create 8 in
+  let ext_of = compute_ext_of cap_decls in
+  let user_constructors = Hashtbl.create 8 in
+  Hashtbl.iter (fun ty s ->
+    let methods = methods_for_ty impls_by_ty ty in
+    Hashtbl.replace user_constructors ty (make_user_constructor s methods)
+  ) struct_decls;
   let ctx : Value.ctx = {
     env  = Env.empty;
     fns;
@@ -45,6 +118,9 @@ let run_program ?(sink = Value.OutChan stdout) prog =
     caps = [];
     cap_decls;
     host_constructors;
+    struct_decls;
+    user_constructors;
+    ext_of;
   } in
   Host_builtin.register ctx;
   ignore (Eval.call_fn ctx main [])

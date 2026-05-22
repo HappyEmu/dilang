@@ -54,3 +54,20 @@ Status: Active (carried from v3) · Cites: design §2.3
 ## DEC-008 — Capabilities and traits as separate mechanisms
 Status: Active (carried from v3) · Cites: design §2.7
 - Rejected: unified — conflates dependency resolution with value shape
+
+## DEC-009 — Struct literals use braces; calls use parens
+Status: Active · Cites: design §2.9, syntax §1.1, §4.1, §7.2
+Struct construction is `Foo { field: value }` (or `Foo` with no braces for fieldless structs). Function calls — including those with named args — are `foo(arg: value)`. The two forms are syntactically distinct at parse time.
+- Rejected: unified `Foo(field: value)` for both — shape carries no semantic signal; reviewer must resolve the name to know whether the line allocates data or runs effects. Optimizing for review (most code will be agent-written) means the syntactic split earns its keep.
+- Rejected: ban named args on functions — readability at call sites is too valuable to give up; reviewers benefit even more than writers from `connect(host: "...", port: 5432)` over positional.
+- Rejected: require `Foo {}` even on empty structs — needless noise. Bare `Foo` constructs a fieldless struct, matching Rust's unit-struct ergonomics.
+
+Implication: named args inside `(...)` always mean a function parameter; named entries inside `{...}` always mean a struct field. Renaming a struct into a fn (or vice versa) with the same name surfaces as a parse-level shape mismatch at call sites, not a silent semantic flip.
+
+## DEC-010 — Function calls: named-args design (Deferred)
+Status: Deferred · Cites: design §2.10
+A previous version of this decision required every argument after the first to be named at the call site. Reverted after implementation surfaced design ambiguities (mixed positional/named ordering rules, interaction with variadic builtins, param-name renames as silent ABI breaks, scope on capability methods vs user fns). For now: **function and capability-method calls are fully positional.** Struct literals remain named (DEC-009) — that decision stands.
+
+Revisit when the typechecker lands; getting the rule right benefits from having type info to surface mismatches with good error messages.
+
+- Currently active position: fully positional calls. Reviewer-readability is left to writers using local variable names well, until the right named-args shape is figured out.

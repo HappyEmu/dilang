@@ -27,8 +27,8 @@ fn outer(name: Str) requires {Logger, Greeter} {
 
 fn main() {
     provide {
-        Logger  = StdoutLogger()  @ Process,
-        Greeter = StdoutGreeter() @ Process
+        Logger  = StdoutLogger  @ Process,
+        Greeter = StdoutGreeter @ Process
     } in {
         outer("alice")
         outer("bob")

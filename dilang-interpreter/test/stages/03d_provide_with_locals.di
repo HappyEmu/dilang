@@ -9,7 +9,7 @@ fn shout(prefix: Str, msg: Str) requires {Logger} {
 
 fn main() {
     let header = "boot"
-    provide { Logger = StdoutLogger() @ Process } in {
+    provide { Logger = StdoutLogger @ Process } in {
         let count = 3
         shout(header, "starting (count=${count})")
         shout(header, "computed = ${1 + 2 * 3}")

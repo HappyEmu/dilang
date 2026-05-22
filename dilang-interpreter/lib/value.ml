@@ -20,7 +20,7 @@ and cap_frame = {
 
 and impl_method_dispatch =
   | DHost of (ctx -> value list -> value)
-  | DUser of Ast.expr                             (* Stage 4 *)
+  | DUser of Ast.impl_method                      (* Stage 4 *)
 
 and env = {
   values : (Ast.ident * value ref) list;
@@ -36,8 +36,13 @@ and ctx = {
   sink              : sink;
   caps              : cap_frame list;                                       (* innermost first *)
   cap_decls         : (Ast.ident, Ast.cap_decl) Hashtbl.t;
-  host_constructors : (Ast.ident, value list -> impl_value) Hashtbl.t;
+  host_constructors : (Ast.ident, (Ast.ident * value) list -> impl_value) Hashtbl.t;
+  struct_decls      : (Ast.ident, Ast.struct_decl) Hashtbl.t;
+  user_constructors : (Ast.ident, (Ast.ident * value) list -> impl_value) Hashtbl.t;
+  ext_of            : (Ast.ident, Ast.ident list) Hashtbl.t;
 }
+
+let with_cap_env (iv : impl_value) caps : impl_value = { iv with cap_env = caps }
 
 let emit_line sink s =
   match sink with

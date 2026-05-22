@@ -9,6 +9,7 @@ open Ast
 %token <string> IDENT
 %token FN LET MUT RETURN
 %token CAPABILITY PROVIDE REQUIRES IN
+%token STRUCT IMPL FOR EXTENDS
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
 %token LPAREN RPAREN LBRACE RBRACE
@@ -35,8 +36,38 @@ decl:
   | FN; n = IDENT; LPAREN; ps = params; RPAREN;
     r = ret_opt; req = requires_opt; b = block
     { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
-  | CAPABILITY; n = IDENT; LBRACE; ms = list(cap_method); RBRACE
-    { DCap { c_name = n; c_methods = ms } }
+  | CAPABILITY; n = IDENT; ext = extends_opt; LBRACE; ms = list(cap_method); RBRACE
+    { DCap { c_name = n; c_extends = ext; c_methods = ms } }
+  | STRUCT; n = IDENT; LBRACE; fs = struct_fields; RBRACE
+    { DStruct { s_name = n; s_fields = fs } }
+  | IMPL; cs = impl_caps; FOR; t = IDENT;
+    LBRACE; req = impl_requires_opt; ms = list(impl_method); RBRACE
+    { DImpl { for_ty = t; caps = cs; priv_requires = req; methods = ms } }
+
+extends_opt:
+  |                                              { [] }
+  | EXTENDS; xs = ident_list_nonempty            { xs }
+
+ident_list_nonempty:
+  | x = IDENT                                    { [x] }
+  | x = IDENT; COMMA; rest = ident_list_nonempty { x :: rest }
+
+struct_fields:
+  |                                              { [] }
+  | p = param                                    { [p] }
+  | p = param; COMMA; rest = struct_fields       { p :: rest }
+
+impl_caps:
+  | x = IDENT                                    { [x] }
+  | x = IDENT; PLUS; rest = impl_caps            { x :: rest }
+
+impl_requires_opt:
+  |                                              { [] }
+  | REQUIRES; LBRACE; xs = ident_list; RBRACE    { xs }
+
+impl_method:
+  | FN; n = IDENT; LPAREN; ps = params; RPAREN; r = ret_opt; b = block
+    { { im_name = n; im_params = ps; im_ret = r; im_body = b } }
 
 ret_opt:
   |                       { None }
@@ -93,8 +124,12 @@ atom:
   | s = STR                                              { Lit (LStr s) }
   | parts = STR_INTERP                                   { StringInterp parts }
   | b = BOOL                                             { Lit (LBool b) }
-  | n = IDENT; DOT; m = IDENT; LPAREN; args = arglist; RPAREN
-                                                         { CapCall { cap = n; method_ = m; args } }
+  | n = IDENT; DOT; m = IDENT; t = dot_tail
+      { match t with
+        | None      -> FieldGet { recv = Var n; name = m }
+        | Some args -> CapCall { cap = n; method_ = m; args } }
+  | n = IDENT; LBRACE; fs = struct_lit_fields; RBRACE
+      { StructLit { ty = n; fields = fs } }
   | n = IDENT                                            { Var n }
   | n = IDENT; LPAREN; args = arglist; RPAREN            { Call { fn = Var n; args } }
   | LPAREN; e = expr; RPAREN                             { e }
@@ -107,10 +142,29 @@ provide_entries:
   |                                                       { [] }
   | e = provide_entry                                     { [e] }
   | e = provide_entry; COMMA; rest = provide_entries      { e :: rest }
+  | e = provide_entry; rest = provide_entries_no_leading_comma  { e :: rest }
+
+provide_entries_no_leading_comma:
+  | e = provide_entry                                     { [e] }
+  | e = provide_entry; COMMA; rest = provide_entries      { e :: rest }
+  | e = provide_entry; rest = provide_entries_no_leading_comma  { e :: rest }
 
 provide_entry:
   | cap = IDENT; EQ; rhs = expr; AT; sc = IDENT
     { Binding { cap; rhs; scope = sc } }
+
+dot_tail:
+  |                                                      { None }
+  | LPAREN; args = arglist; RPAREN                       { Some args }
+
+struct_lit_fields:
+  |                                                                       { [] }
+  | n = IDENT; COLON; e = expr; rest = struct_lit_fields_tail             { (n, e) :: rest }
+
+struct_lit_fields_tail:
+  |                                                                       { [] }
+  | COMMA                                                                 { [] }
+  | COMMA; n = IDENT; COLON; e = expr; rest = struct_lit_fields_tail      { (n, e) :: rest }
 
 arglist:
   |                                                      { [] }

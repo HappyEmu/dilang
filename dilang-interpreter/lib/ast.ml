@@ -22,6 +22,8 @@ type expr =
   | StringInterp of string_part list
   | CapCall of { cap : ident; method_ : ident; args : expr list }
   | Provide of { entries : provide_entry list; scope : ident option; body : expr option }
+  | FieldGet of { recv : expr; name : ident }
+  | StructLit of { ty : type_name; fields : (ident * expr) list }
 
 and string_part =
   | SLit of string
@@ -56,7 +58,27 @@ type cap_method_sig = {
 
 type cap_decl = {
   c_name    : ident;
+  c_extends : ident list;
   c_methods : cap_method_sig list;
+}
+
+type struct_decl = {
+  s_name   : type_name;
+  s_fields : (ident * type_name) list;
+}
+
+type impl_method = {
+  im_name   : ident;
+  im_params : (ident * type_name) list;
+  im_ret    : type_name option;
+  im_body   : expr;
+}
+
+type impl_decl = {
+  for_ty        : type_name;
+  caps          : ident list;
+  priv_requires : ident list;
+  methods       : impl_method list;
 }
 
 type fn_decl = {
@@ -68,7 +90,9 @@ type fn_decl = {
 }
 
 type decl =
-  | DFn  of fn_decl
-  | DCap of cap_decl
+  | DFn     of fn_decl
+  | DCap    of cap_decl
+  | DStruct of struct_decl
+  | DImpl   of impl_decl
 
 type program = decl list

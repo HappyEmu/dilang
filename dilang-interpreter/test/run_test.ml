@@ -93,7 +93,7 @@ let stress_many_cap_calls () =
   Buffer.add_string b
     "capability Logger { fn info(msg: Str) }\n\
      fn main() {\n\
-     \    provide { Logger = StdoutLogger() @ Process } in {\n";
+     \    provide { Logger = StdoutLogger @ Process } in {\n";
   for i = 1 to n do
     Buffer.add_string b (Printf.sprintf "        Logger.info(\"line %d\")\n" i)
   done;
@@ -115,7 +115,7 @@ let stress_nested_provide () =
      fn main() {\n";
   for i = 1 to n do
     Buffer.add_string b
-      (Printf.sprintf "%sprovide { Logger = StdoutLogger() @ Process } in {\n"
+      (Printf.sprintf "%sprovide { Logger = StdoutLogger @ Process } in {\n"
          (String.make (i * 4) ' '));
     Buffer.add_string b
       (Printf.sprintf "%sLogger.info(\"level %d\")\n"
@@ -130,6 +130,83 @@ let stress_nested_provide () =
   Alcotest.(check int) "line count" (n + 1) (List.length lines);
   Alcotest.(check string) "first" "level 1"  (List.nth lines 0);
   Alcotest.(check string) "last"  (Printf.sprintf "level %d" n) (List.nth lines (n - 1))
+
+let stress_long_extends_chain () =
+  (* Chain of N (>=10) caps each extending the previous. A single binding
+     under the top-most cap resolves a call to the base cap's method. *)
+  let n = 12 in
+  let b = Buffer.create 4096 in
+  Buffer.add_string b "capability C0 { fn ping(msg: Str) }\n";
+  for i = 1 to n - 1 do
+    Buffer.add_string b (Printf.sprintf "capability C%d extends C%d {}\n" i (i - 1))
+  done;
+  Buffer.add_string b "struct Pinger {}\n";
+  Buffer.add_string b "impl C0 for Pinger {\n";
+  Buffer.add_string b "    fn ping(msg: Str) { print(\"got:${msg}\") }\n";
+  Buffer.add_string b "}\n";
+  Buffer.add_string b (Printf.sprintf
+    "fn main() {\n\
+     \    provide { C%d = Pinger @ Process } in { C0.ping(\"chain\") }\n\
+     }\n" (n - 1));
+  let out = run_string (Buffer.contents b) in
+  Alcotest.(check string) "long extends chain" "got:chain\n" out
+
+let stress_wide_provide_chain () =
+  (* 20 bindings where each cap C_i's impl info() calls C_{i-1}.info().
+     Verifies left-to-right cap-env capture across a long frame. *)
+  let n = 20 in
+  let b = Buffer.create 8192 in
+  for i = 0 to n - 1 do
+    Buffer.add_string b
+      (Printf.sprintf "capability C%d { fn info(msg: Str) }\n" i)
+  done;
+  Buffer.add_string b "struct Base {}\n";
+  Buffer.add_string b "impl C0 for Base { fn info(msg: Str) { print(\"0:${msg}\") } }\n";
+  for i = 1 to n - 1 do
+    Buffer.add_string b (Printf.sprintf "struct S%d {}\n" i);
+    Buffer.add_string b
+      (Printf.sprintf "impl C%d for S%d {\n\
+                       \    fn info(msg: Str) { C%d.info(\"${msg}\") }\n\
+                       }\n" i i (i - 1))
+  done;
+  Buffer.add_string b "fn main() {\n    provide {\n";
+  Buffer.add_string b "        C0 = Base @ Process\n";
+  for i = 1 to n - 1 do
+    Buffer.add_string b
+      (Printf.sprintf "        C%d = S%d @ Process\n" i i)
+  done;
+  Buffer.add_string b
+    (Printf.sprintf "    } in { C%d.info(\"go\") }\n}\n" (n - 1));
+  let out = run_string (Buffer.contents b) in
+  Alcotest.(check string) "wide provide chain" "0:go\n" out
+
+let stress_many_fields () =
+  (* Struct with K fields. The method concatenates all self.f_i. *)
+  let k = 20 in
+  let b = Buffer.create 4096 in
+  Buffer.add_string b "capability Cat { fn shout() }\n";
+  Buffer.add_string b "struct Big { ";
+  for i = 0 to k - 1 do
+    if i > 0 then Buffer.add_string b ", ";
+    Buffer.add_string b (Printf.sprintf "f%d: Str" i)
+  done;
+  Buffer.add_string b " }\nimpl Cat for Big {\n    fn shout() { print(\"";
+  for i = 0 to k - 1 do
+    Buffer.add_string b (Printf.sprintf "${self.f%d}" i)
+  done;
+  Buffer.add_string b "\") }\n}\nfn main() {\n    provide { Cat = Big { ";
+  for i = 0 to k - 1 do
+    if i > 0 then Buffer.add_string b ", ";
+    Buffer.add_string b (Printf.sprintf "f%d: \"%d\"" i i)
+  done;
+  Buffer.add_string b " } @ Process } in { Cat.shout() }\n}\n";
+  let out = run_string (Buffer.contents b) in
+  let expected = Buffer.create 64 in
+  for i = 0 to k - 1 do
+    Buffer.add_string expected (string_of_int i)
+  done;
+  Buffer.add_char expected '\n';
+  Alcotest.(check string) "many fields" (Buffer.contents expected) out
 
 let stress_interpolation () =
   let n = 200 in
@@ -162,7 +239,7 @@ let neg_unknown_method () =
       run_string
         "capability Logger { fn info(msg: Str) }\n\
          fn main() {\n\
-         \    provide { Logger = StdoutLogger() @ Process } in {\n\
+         \    provide { Logger = StdoutLogger @ Process } in {\n\
          \        Logger.bogus(\"x\")\n\
          \    }\n\
          }\n")
@@ -197,6 +274,102 @@ let neg_type_error_binop () =
   check_raises_substr "type error" "type error"
     (fun () -> run_string "fn main() { print(1 + \"x\") }\n")
 
+let neg_provide_forward_ref () =
+  (* A's RHS uses B, but B is declared later in the same provide block. *)
+  check_raises_substr "forward ref" "capability B not in scope"
+    (fun () ->
+      run_string
+        "capability A { fn a() }\n\
+         capability B { fn b() -> Str }\n\
+         struct AImpl {}\n\
+         impl A for AImpl {\n\
+         \    requires {B}\n\
+         \    fn a() { print(B.b()) }\n\
+         }\n\
+         struct BImpl {}\n\
+         impl B for BImpl {\n\
+         \    fn b() -> Str { \"hi\" }\n\
+         }\n\
+         struct UsesB {}\n\
+         impl A for UsesB {\n\
+         \    fn a() { print(B.b()) }\n\
+         }\n\
+         fn main() {\n\
+         \    provide {\n\
+         \        A = UsesB @ Process,\n\
+         \        B = BImpl @ Process\n\
+         \    } in { A.a() }\n\
+         }\n")
+
+let neg_struct_missing_field () =
+  check_raises_substr "missing field"
+    "struct PrefixedLogger is missing field prefix"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         struct PrefixedLogger { prefix: Str }\n\
+         impl Logger for PrefixedLogger {\n\
+         \    fn info(msg: Str) { print(self.prefix) }\n\
+         }\n\
+         fn main() {\n\
+         \    provide { Logger = PrefixedLogger {} @ Process } in {\n\
+         \        Logger.info(\"x\")\n\
+         \    }\n\
+         }\n")
+
+let neg_struct_unknown_field () =
+  check_raises_substr "unknown field"
+    "struct PrefixedLogger has no field bogus"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         struct PrefixedLogger { prefix: Str }\n\
+         impl Logger for PrefixedLogger {\n\
+         \    fn info(msg: Str) { print(self.prefix) }\n\
+         }\n\
+         fn main() {\n\
+         \    provide { Logger = PrefixedLogger { prefix: \"x\", bogus: \"y\" } @ Process } in {\n\
+         \        Logger.info(\"x\")\n\
+         \    }\n\
+         }\n")
+
+let neg_missing_impl_method () =
+  check_raises_substr "missing method" "has no method info"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         struct Empty {}\n\
+         impl Logger for Empty {}\n\
+         fn main() {\n\
+         \    provide { Logger = Empty @ Process } in {\n\
+         \        Logger.info(\"x\")\n\
+         \    }\n\
+         }\n")
+
+let neg_undeclared_field () =
+  check_raises_substr "undeclared field" "no field nope"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         struct PrefixedLogger { prefix: Str }\n\
+         impl Logger for PrefixedLogger {\n\
+         \    fn info(msg: Str) { print(self.nope) }\n\
+         }\n\
+         fn main() {\n\
+         \    provide { Logger = PrefixedLogger { prefix: \"x\" } @ Process } in {\n\
+         \        Logger.info(\"y\")\n\
+         \    }\n\
+         }\n")
+
+let neg_field_on_non_impl () =
+  check_raises_substr "field on non-impl" "field access on non-impl value"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let x = 42\n\
+         \    print(x.field)\n\
+         }\n")
+
 let () =
   Alcotest.run "dilang-stages"
     [ "stage1",
@@ -217,6 +390,15 @@ let () =
       ; Alcotest.test_case "03c_nested_provide"    `Quick (stage_test ~name:"03c_nested_provide")
       ; Alcotest.test_case "03d_provide_locals"    `Quick (stage_test ~name:"03d_provide_with_locals")
       ]
+    ; "stage4",
+      [ Alcotest.test_case "04_user_impls"        `Quick (stage_test ~name:"04_user_impls")
+      ; Alcotest.test_case "04b_extends"          `Quick (stage_test ~name:"04b_extends")
+      ; Alcotest.test_case "04c_chained_capture"  `Quick (stage_test ~name:"04c_chained_capture")
+      ; Alcotest.test_case "04d_fields"           `Quick (stage_test ~name:"04d_fields")
+      ; Alcotest.test_case "04e_multifield"       `Quick (stage_test ~name:"04e_multifield")
+      ; Alcotest.test_case "04f_multi_impl"       `Quick (stage_test ~name:"04f_multi_impl")
+      ; Alcotest.test_case "04g_provided_with_arg" `Quick (stage_test ~name:"04g_provided_with_arg")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -224,6 +406,9 @@ let () =
       ; Alcotest.test_case "deep_lets_300"         `Quick stress_deep_lets
       ; Alcotest.test_case "many_cap_calls_500"    `Quick stress_many_cap_calls
       ; Alcotest.test_case "nested_provide_50"     `Quick stress_nested_provide
+      ; Alcotest.test_case "long_extends_chain"    `Quick stress_long_extends_chain
+      ; Alcotest.test_case "wide_provide_chain"    `Quick stress_wide_provide_chain
+      ; Alcotest.test_case "many_fields_20"        `Quick stress_many_fields
       ; Alcotest.test_case "interpolation_200"     `Quick stress_interpolation
       ]
     ; "errors",
@@ -234,5 +419,11 @@ let () =
       ; Alcotest.test_case "unknown_function"    `Quick neg_unknown_function
       ; Alcotest.test_case "provide_non_impl"    `Quick neg_provide_non_impl
       ; Alcotest.test_case "type_error_binop"    `Quick neg_type_error_binop
+      ; Alcotest.test_case "provide_forward_ref"   `Quick neg_provide_forward_ref
+      ; Alcotest.test_case "struct_missing_field"  `Quick neg_struct_missing_field
+      ; Alcotest.test_case "struct_unknown_field"  `Quick neg_struct_unknown_field
+      ; Alcotest.test_case "missing_impl_method"   `Quick neg_missing_impl_method
+      ; Alcotest.test_case "undeclared_field"      `Quick neg_undeclared_field
+      ; Alcotest.test_case "field_on_non_impl"     `Quick neg_field_on_non_impl
       ]
     ]

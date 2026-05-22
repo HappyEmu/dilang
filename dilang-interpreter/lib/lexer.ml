@@ -22,6 +22,10 @@ let keyword_or_ident s =
   | "provide"    -> PROVIDE
   | "requires"   -> REQUIRES
   | "in"         -> IN
+  | "struct"     -> STRUCT
+  | "impl"       -> IMPL
+  | "for"        -> FOR
+  | "extends"    -> EXTENDS
   | "true"       -> BOOL true
   | "false"      -> BOOL false
   | _            -> IDENT s

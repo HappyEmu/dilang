@@ -32,7 +32,19 @@ let rec eval (ctx : ctx) = function
   | Lit (LStr s)  -> VStr s
   | Lit (LBool b) -> VBool b
   | Lit LUnit     -> VUnit
-  | Var x         -> Env.lookup ctx.env x
+  | Var x ->
+      (* Locals shadow constructors. Bare name falls through to construct a
+         fieldless user struct (DEC-009: `JsonLogger` ≡ `JsonLogger {}`) or
+         host impl. Anything with required fields fails the named-fields
+         check inside the constructor closure with a clear message. *)
+      (try Env.lookup ctx.env x
+       with Failure _ ->
+         (match Hashtbl.find_opt ctx.user_constructors x with
+          | Some ctor -> VImpl (ctor [])
+          | None ->
+              (match Hashtbl.find_opt ctx.host_constructors x with
+               | Some ctor -> VImpl (ctor [])
+               | None      -> failwith ("unbound name: " ^ x))))
   | Let { name; mut = _; rhs; body } ->
       let v = eval ctx rhs in
       let env' = Env.extend ctx.env name v in
@@ -44,13 +56,13 @@ let rec eval (ctx : ctx) = function
       List.iter (fun v -> emit_line ctx.sink (Value.to_display v)) vs;
       VUnit
   | Call { fn = Var name; args } ->
+      (* DEC-009: `Foo(args)` is a function call only. Struct/impl
+         construction uses `Foo { field: value }` (or bare `Foo` for
+         fieldless), handled by Var/StructLit. *)
       let argv = List.map (eval ctx) args in
       (match Hashtbl.find_opt ctx.fns name with
        | Some f -> call_fn ctx f argv
-       | None ->
-           (match Hashtbl.find_opt ctx.host_constructors name with
-            | Some ctor -> VImpl (ctor argv)
-            | None      -> failwith ("unknown function: " ^ name)))
+       | None   -> failwith ("unknown function: " ^ name))
   | Call _ ->
       failwith "first-class function calls not supported in Stage 1"
   | BinOp (op, a, b) ->
@@ -69,30 +81,85 @@ let rec eval (ctx : ctx) = function
   | Provide { entries; scope; body = Some b } ->
       Eio.Switch.run @@ fun sw ->
       let scope_name = Option.value scope ~default:"Process" in
-      let bindings = List.map (fun entry ->
-        match entry with
+      let built = ref [] in
+      List.iter (function
         | Binding { cap; rhs; scope = _ } ->
-            (* @ Scope is parsed and stored on the entry as a label, ignored at Stage 3 *)
-            (match eval ctx rhs with
-             | VImpl iv -> (cap, iv)
+            (* Build partial frame from prior bindings so each RHS resolves
+               against bindings declared *to its left* in the same provide
+               block. Forward references raise "capability X not in scope". *)
+            let partial = { scope = scope_name; bindings = List.rev !built; switch = sw } in
+            let caps_now = partial :: ctx.caps in
+            let ctx_bind = { ctx with caps = caps_now } in
+            (match eval ctx_bind rhs with
+             | VImpl iv -> built := (cap, with_cap_env iv caps_now) :: !built
              | _ -> failwith ("provide binding for " ^ cap ^ " did not evaluate to an impl"))
-        | Using _ -> failwith "`using` is not supported in Stage 3 (Stage 9)"
-      ) entries in
-      let frame = { scope = scope_name; bindings; switch = sw } in
+        | Using _ -> failwith "`using` is not supported in Stage 4 (Stage 9)"
+      ) entries;
+      let frame = { scope = scope_name; bindings = List.rev !built; switch = sw } in
       eval { ctx with caps = frame :: ctx.caps } b
   | Provide { body = None; _ } ->
-      failwith "Wiring values (provide without `in`) are not supported in Stage 3 (Stage 9)"
+      failwith "Wiring values (provide without `in`) are not supported in Stage 4 (Stage 9)"
   | CapCall { cap; method_; args } ->
-      let impl =
-        match List.find_opt (fun f -> List.mem_assoc cap f.bindings) ctx.caps with
-        | None   -> failwith ("capability " ^ cap ^ " not in scope")
-        | Some f -> List.assoc cap f.bindings
+      (* Walk frames innermost-first; within each frame scan bindings in
+         reverse declaration order ("later wins" per syntax §7.1 / DEC-002).
+         Accept the first binding whose declared cap C' has ext_of[C'] ∋ cap. *)
+      let find_in_frame (f : cap_frame) =
+        let rec scan = function
+          | [] -> None
+          | (c', iv) :: rest ->
+              let exts =
+                try Hashtbl.find ctx.ext_of c' with Not_found -> [c']
+              in
+              if List.mem cap exts then Some iv else scan rest
+        in
+        scan (List.rev f.bindings)
       in
+      let rec walk = function
+        | [] -> failwith ("capability " ^ cap ^ " not in scope")
+        | f :: rest ->
+            (match find_in_frame f with
+             | Some iv -> iv
+             | None    -> walk rest)
+      in
+      let impl = walk ctx.caps in
       let arg_vs = List.map (eval ctx) args in
       (match List.assoc_opt method_ impl.methods with
        | None              -> failwith ("capability " ^ cap ^ " has no method " ^ method_)
        | Some (DHost f)    -> f ctx arg_vs
-       | Some (DUser _)    -> failwith "user impls not supported in Stage 3")
+       | Some (DUser m) ->
+           if List.length m.im_params <> List.length arg_vs then
+             failwith ("arity mismatch calling " ^ cap ^ "." ^ method_);
+           let env0 =
+             List.fold_left2
+               (fun env (pname, _ty) v -> Env.extend env pname v)
+               Env.empty m.im_params arg_vs
+           in
+           let env_with_self =
+             if impl.fields = [] then env0
+             else Env.extend env0 "self" (VImpl impl)
+           in
+           let activation_ctx =
+             { ctx with env = env_with_self; caps = impl.cap_env }
+           in
+           (try eval activation_ctx m.im_body with Return_exn v -> v))
+  | StructLit { ty; fields } ->
+      let evaluated = List.map (fun (n, e) -> (n, eval ctx e)) fields in
+      let ctor =
+        match Hashtbl.find_opt ctx.user_constructors ty with
+        | Some c -> c
+        | None ->
+            (match Hashtbl.find_opt ctx.host_constructors ty with
+             | Some c -> c
+             | None   -> failwith ("unknown struct: " ^ ty))
+      in
+      VImpl (ctor evaluated)
+  | FieldGet { recv; name } ->
+      (match eval ctx recv with
+       | VImpl iv ->
+           (match List.assoc_opt name iv.fields with
+            | Some r -> !r
+            | None   -> failwith ("no field " ^ name ^ " on " ^ iv.ty))
+       | _ -> type_err ("field access on non-impl value: " ^ name))
 
 and call_fn (ctx : ctx) (f : fn_decl) args =
   if List.length f.params <> List.length args then

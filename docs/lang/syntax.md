@@ -38,6 +38,8 @@ A function declaration has shape:
 
 The two effect-row clauses are optional and default to `{}`. `pub` is a row-checking modifier (see §3.2.4 of design): declared rows must match the body exactly. Non-`pub` functions infer their rows.
 
+Call sites pass arguments positionally. A named-arguments rule was considered (DEC-010, deferred); revisit alongside the typechecker.
+
 ### 1.2 Function types
 
 Function types appear in fields, parameters, and type aliases. The leading `fn` is required.
@@ -144,9 +146,41 @@ Traits cannot appear in `requires` rows; they appear as constraints on generic p
 
 -----
 
-## 4. Implementations
+## 4. Structs and implementations
 
-### 4.1 Basic shape
+### 4.1 Structs
+
+Structs are nominal record types. Declared with `struct`:
+
+```di
+struct PrefixedLogger { prefix: Str }
+
+struct Cached<T> {
+    value: T,
+    cached_at: Instant
+}
+
+struct UnitMarker {}
+```
+
+Instances are constructed with brace literals — fields are always named, never positional. See DEC-009 for the rationale (syntactic split between data construction and function calls):
+
+```di
+let logger = PrefixedLogger { prefix: "app" }
+let entry  = Cached { value: row, cached_at: Clock.now() }
+```
+
+Field order at the literal site is free; the parser matches by name. Every declared field must appear unless it has a default (defaults: future concern).
+
+Fieldless structs may be constructed with the bare name — the empty braces are optional:
+
+```di
+let m = UnitMarker          // equivalent to UnitMarker {}
+```
+
+This mirrors Rust's unit-struct ergonomics and keeps `provide` blocks readable when an impl carries no configuration.
+
+### 4.2 Basic impl shape
 
 ```di
 impl ReadDb for InMemoryDb {
@@ -165,7 +199,7 @@ impl[<generics>] Cap1 [+ Cap2] for Type[<generics>] [where bounds] {
 }
 ```
 
-### 4.2 Impl-private requires
+### 4.3 Impl-private requires
 
 An impl may declare a private `requires` row — capabilities it needs internally that callers do not see.
 
@@ -187,13 +221,13 @@ impl ReadDb + WriteDb for Postgres {
 
 Callers see `requires {ReadDb}` or `requires {WriteDb}` — not `requires {ReadDb, IO, Metrics}`. The private row is satisfied at the `provide` site, not at every call.
 
-### 4.3 Multiple conformance
+### 4.4 Multiple conformance
 
 ```di
 impl Logger + Metrics for ObservabilityStack { /* ... */ }
 ```
 
-### 4.4 Generic impls
+### 4.5 Generic impls
 
 ```di
 impl<T> Iterator<T> for Stream<T> { /* ... */ }
@@ -276,15 +310,15 @@ Entries combine in lexical order; later entries shadow earlier ones on conflict.
 
 ```di
 provide {
-    Database = Postgres(IO.env("DB_URL") ?? "") @ Process
-    Logger   = JsonLogger()                     @ Process
-    Clock    = SystemClock()                    @ Process
+    Database = Postgres { url: IO.env("DB_URL") ?? "" } @ Process
+    Logger   = JsonLogger                               @ Process
+    Clock    = SystemClock                              @ Process
 } in {
     serve(8080, router())
 }
 ```
 
-Every binding specifies its scope with `@ ScopeName`. No defaults.
+Every binding specifies its scope with `@ ScopeName`. No defaults. RHS shapes follow DEC-009: braces for struct literals (`Postgres { url: ... }`), bare name for fieldless structs (`JsonLogger`), parens for function calls returning impl values.
 
 ### 7.3 Provide targeting a non-Process scope
 
@@ -303,11 +337,11 @@ A `provide { ... }` with no `in` is a value of type `Wiring`.
 
 ```di
 fn base_runtime() -> Wiring {
-    let rt = FiberRuntime(workers: 8)
+    let rt = FiberRuntime { workers: 8 }
     provide {
-        IO     = rt              @ Process
-        Logger = JsonLogger()    @ Process
-        Clock  = SystemClock()   @ Process
+        IO     = rt           @ Process
+        Logger = JsonLogger   @ Process
+        Clock  = SystemClock  @ Process
     }
 }
 ```
@@ -317,7 +351,7 @@ fn base_runtime() -> Wiring {
 ```di
 provide {
     using base_runtime(), pg_repos(),
-    TaskRepo = FailingTaskRepo() @ Process,     // overrides the one in pg_repos()
+    TaskRepo = FailingTaskRepo @ Process,       // overrides the one in pg_repos()
 } in {
     serve(8080, router())
 }

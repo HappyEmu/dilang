@@ -92,6 +92,22 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 2.8.3 Every binding in a `provide` block specifies its scope explicitly with `@ ScopeName`. There are no defaults. Scope visibility is a deliberate design choice at every binding site.
 
+### 2.9 Construction and calls are syntactically distinct
+
+2.9.1 Struct/impl literals use braces: `Foo { field: value }`. Function and method calls use parens: `foo(arg)`, `Cap.method(arg)`. The shape carries semantics — a reader can tell *pure data construction* from *invocation* without resolving the name.
+
+2.9.2 Fieldless structs may be constructed with the bare name (`JsonLogger` ≡ `JsonLogger {}`), matching the unit-struct ergonomics that keep `provide` blocks readable.
+
+2.9.3 Renaming a struct into a function (or vice versa) with the same name produces a parse-level shape mismatch at every call site, not a silent semantic flip. The cost of two syntaxes buys this refactor safety. See DEC-009.
+
+### 2.10 Optimize for review, not writing
+
+2.10.1 The dominant cost of code is reading it — at review, after returning to it months later, when a new contributor lands. Most code today is being written by agents; most of the human time spent on a codebase is review. The language design treats writers as the secondary audience.
+
+2.10.2 Concrete manifestations: `requires {...}` rows on signatures (§2.1), explicit `@ ScopeName` on every binding (§2.8.3), the absence of `?` for error propagation (§2.5.3), and the construction/call syntactic split (§2.9). In each case the writer types more so the reader thinks less. That trade is the right one when an LLM types most of the keystrokes.
+
+2.10.3 Named arguments at call sites would be another natural manifestation of this principle but the design is non-trivial (DEC-010 deferred). Until then, the burden falls on writers to use descriptive local names so `deposit(account, amount, currency)` reads at least as `deposit(alice_account, transfer_amount, usd)`.
+
 -----
 
 ## 3. Conceptual model
