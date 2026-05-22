@@ -8,6 +8,7 @@ The capability-native language. Dependency injection as a first-class language f
 2. **[syntax.md](./syntax.md)** — illustrative syntax for every construct. Not a formal grammar; the language is still iterating.
 3. **[examples/](./examples/)** — concrete programs putting the pieces together. One file per architectural pattern.
    - [01-layered-backend.md](./examples/01-layered-backend.md) — task-tracker HTTP service in the classic controller/service/repository style.
+4. **[decisions.md](./decisions.md)** — terse log of design decisions and rejected alternatives, with stable `DEC-NNN` IDs for citation. Consult before re-opening a settled question.
 
 ## Pointing into the docs
 
