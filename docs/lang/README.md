@@ -8,7 +8,11 @@ The capability-native language. Dependency injection as a first-class language f
 2. **[syntax.md](./syntax.md)** — illustrative syntax for every construct. Not a formal grammar; the language is still iterating.
 3. **[examples/](./examples/)** — concrete programs putting the pieces together. One file per architectural pattern.
    - [01-layered-backend.md](./examples/01-layered-backend.md) — task-tracker HTTP service in the classic controller/service/repository style.
-4. **[decisions.md](./decisions.md)** — terse log of design decisions and rejected alternatives, with stable `DEC-NNN` IDs for citation. Consult before re-opening a settled question.
+4. **[guarantees/](./guarantees/)** — what dilang catches at compile time, demonstrated with bug-class vignettes. Each entry: naive code that compiles elsewhere → the compile error → the forced redesign.
+   - [01-job-vs-request-scope.md](./guarantees/01-job-vs-request-scope.md) — request-scoped state bleeding into background workers.
+   - [02-cross-tenant-leak.md](./guarantees/02-cross-tenant-leak.md) — multi-tenant workers reading/writing the wrong tenant's data.
+   - [03-transaction-escape.md](./guarantees/03-transaction-escape.md) — a transaction handle used after COMMIT, directly or via deferred work.
+5. **[decisions.md](./decisions.md)** — terse log of design decisions and rejected alternatives, with stable `DEC-NNN` IDs for citation. Consult before re-opening a settled question.
 
 ## Pointing into the docs
 
