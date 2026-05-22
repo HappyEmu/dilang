@@ -18,6 +18,12 @@ type expr =
   | Block of expr list
   | Call of { fn : expr; args : expr list }
   | BinOp of bin_op * expr * expr
+  | Return of expr
+  | StringInterp of string_part list
+
+and string_part =
+  | SLit of string
+  | SInterp of expr
 
 type block_item =
   | BLet of { name : ident; mut : bool; rhs : expr }

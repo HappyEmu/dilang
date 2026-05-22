@@ -21,4 +21,8 @@ let () =
       [ Alcotest.test_case "01_arith" `Quick (stage_test ~name:"01_arith")
       ; Alcotest.test_case "01b_full" `Quick (stage_test ~name:"01b_full")
       ]
+    ; "stage2",
+      [ Alcotest.test_case "02_functions" `Quick (stage_test ~name:"02_functions")
+      ; Alcotest.test_case "02b_returns_and_interp" `Quick (stage_test ~name:"02b_returns_and_interp")
+      ]
     ]

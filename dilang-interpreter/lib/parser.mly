@@ -4,25 +4,31 @@ open Ast
 
 %token <int64>  INT
 %token <string> STR
+%token <Ast.string_part list> STR_INTERP
 %token <bool>   BOOL
 %token <string> IDENT
-%token FN LET MUT
+%token FN LET MUT RETURN
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
 %token LPAREN RPAREN LBRACE RBRACE
 %token COMMA COLON ARROW
 %token EOF
 
+%nonassoc RETURN
 %left EQEQ BANGEQ LT GT LEQ GEQ
 %left PLUS MINUS
 %left STAR SLASH
 
 %start <Ast.program> program
+%start <Ast.expr>    expr_entry
 
 %%
 
 program:
   | ds = list(decl); EOF { ds }
+
+expr_entry:
+  | e = expr; EOF { e }
 
 decl:
   | FN; n = IDENT; LPAREN; ps = params; RPAREN; r = ret_opt; b = block
@@ -52,6 +58,7 @@ mut_opt:
   | MUT { true  }
 
 expr:
+  | RETURN; e = expr             { Return e }
   | l = expr; PLUS;   r = expr   { BinOp (Add, l, r) }
   | l = expr; MINUS;  r = expr   { BinOp (Sub, l, r) }
   | l = expr; STAR;   r = expr   { BinOp (Mul, l, r) }
@@ -67,6 +74,7 @@ expr:
 atom:
   | i = INT                                              { Lit (LInt i) }
   | s = STR                                              { Lit (LStr s) }
+  | parts = STR_INTERP                                   { StringInterp parts }
   | b = BOOL                                             { Lit (LBool b) }
   | n = IDENT                                            { Var n }
   | n = IDENT; LPAREN; args = arglist; RPAREN            { Call { fn = Var n; args } }

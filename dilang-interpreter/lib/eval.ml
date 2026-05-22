@@ -1,6 +1,8 @@
 open Ast
 open Value
 
+exception Return_exn of value
+
 type sink =
   | OutChan of out_channel
   | Buf     of Buffer.t
@@ -70,6 +72,15 @@ let rec eval ctx = function
       let va = eval ctx a in
       let vb = eval ctx b in
       eval_binop op va vb
+  | Return e ->
+      raise (Return_exn (eval ctx e))
+  | StringInterp parts ->
+      let b = Buffer.create 32 in
+      List.iter (function
+        | SLit s    -> Buffer.add_string b s
+        | SInterp e -> Buffer.add_string b (Value.to_display (eval ctx e))
+      ) parts;
+      VStr (Buffer.contents b)
 
 and call_fn ctx f args =
   if List.length f.params <> List.length args then
@@ -79,4 +90,5 @@ and call_fn ctx f args =
       (fun env (pname, _ty) v -> Env.extend env pname v)
       Env.empty f.params args
   in
-  eval { ctx with env = env0 } f.body
+  try eval { ctx with env = env0 } f.body
+  with Return_exn v -> v

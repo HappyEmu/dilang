@@ -1,0 +1,5 @@
+15
+14
+x = 21, doubled = 42
+literal: ${not interpolated}
+nested: y = 6, doubled = 12
