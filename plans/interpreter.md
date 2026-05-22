@@ -1372,6 +1372,279 @@ The interpreter doesn't get retired by the checker — together they form the fr
 
 -----
 
+## Cross-cutting: OCaml project sketch
+
+The shape of the codebase after all stages land. Per-stage sections show the *delta* added at each step; this section shows the *destination* — the consolidated types and module signatures the interpreter converges on.
+
+### Core types
+
+```ocaml
+(* lib/syntax/ast.ml *)
+
+type ident = string
+type type_name = string
+
+type literal =
+  | LInt    of int64
+  | LFloat  of float
+  | LStr    of string
+  | LBool   of bool
+  | LUnit
+
+type expr =
+  (* Stage 1–2 *)
+  | Lit          of literal
+  | Var          of ident
+  | Let          of { name : ident; mut : bool; rhs : expr; body : expr }
+  | Assign       of { name : ident; rhs : expr }
+  | Block        of expr list
+  | Call         of { fn : expr; args : expr list }
+  | BinOp        of bin_op * expr * expr
+  | StringInterp of string_part list
+  | Return       of expr
+  (* Stage 3–4 *)
+  | CapCall      of { cap : ident; method_ : ident; args : expr list }
+  | MethodCall   of { recv : expr; name : ident; args : expr list }
+  | Provide      of { entries : provide_entry list; scope : ident option;
+                      body : expr option }
+  | StructLit    of { ty : type_name; fields : (ident * expr) list;
+                      spread : expr option }
+  (* Stage 5 *)
+  | If           of expr * expr * expr option
+  | Raise        of { variant : ident; payload : expr list }
+  | Try          of { body : expr; arms : (pattern * expr) list }
+  | NullCoalesce of expr * expr
+  | OptChain     of { recv : expr; name : ident }
+  | OptCall      of { recv : expr; name : ident; args : expr list }
+  | EnumLit      of { ty : type_name option; tag : string; args : expr list }
+  | Match        of expr * (pattern * expr) list
+  (* Stage 6 *)
+  | Defer        of expr
+  (* Stage 10 *)
+  | Lambda       of { params : ident list; body : expr }
+  (* Stage 12 *)
+  | Uncancel     of expr
+  | Select       of (expr * expr) list
+  (* Stage 13 *)
+  | Stream       of expr
+  | Yield        of expr
+  | Loop         of expr
+  | For          of { var : ident; iter : expr; body : expr }
+  | Break
+  | Continue
+  (* Misc *)
+  | Panic        of expr
+  | Sql          of string_part list
+
+and string_part = SLit of string | SInterp of expr
+
+and provide_entry =
+  | Binding of { cap : ident; rhs : expr; scope : ident }
+  | Using   of expr list
+
+and pattern =
+  | PWild
+  | PVar     of ident
+  | PLit     of literal
+  | PVariant of { ty : type_name option; tag : string; sub : pattern list }
+  | PStruct  of { ty : type_name; fields : (ident * pattern) list }
+
+type decl =
+  | DFn     of fn_decl
+  | DCap    of cap_decl
+  | DTrait  of trait_decl
+  | DImpl   of impl_decl
+  | DStruct of struct_decl
+  | DEnum   of enum_decl
+  | DScope  of ident                                   (* Stage 7 *)
+  | DType   of { name : ident; def : ty }
+  | DTest   of { name : string; body : expr }          (* Stage 14 *)
+
+type program = decl list
+```
+
+### Runtime values
+
+```ocaml
+(* lib/semantics/value.ml *)
+
+type value =
+  | VUnit
+  | VBool   of bool
+  | VInt    of int64
+  | VFloat  of float
+  | VStr    of string
+  | VList   of value list
+  | VStruct of { ty : type_name; fields : (string * value ref) list }
+  | VEnum   of { ty : type_name; tag : string; payload : value list }
+  | VOpt    of value option                  (* Stage 5 *)
+  | VFn     of fn_value                      (* Stage 10 *)
+  | VImpl   of impl_value                    (* Stage 3 *)
+  | VHost   of host_value                    (* OCaml-defined built-ins *)
+  | VWiring of wiring                        (* Stage 9 *)
+  | VStream of stream_handle                 (* Stage 13 *)
+  | VFuture of future_handle                 (* Stage 11 *)
+  | VGroup  of group_handle                  (* Stage 11 *)
+  | VCancel of cancel_token                  (* Stage 12 *)
+  | VDur    of float                         (* seconds *)
+
+and fn_value = {
+  params  : ident list;
+  body    : Ast.expr;
+  closure : env;                             (* captured values + caps *)
+}
+
+and impl_value = {
+  ty            : type_name;
+  fields        : (string * value ref) list;
+  cap_env       : cap_env;                   (* captured at binding time *)
+  methods       : (string * impl_method_dispatch) list;
+  drop          : (unit -> unit) option;
+  lifecycle     : lifecycle option;          (* Stage 8 *)
+}
+
+and impl_method_dispatch =
+  | DUser of Ast.impl_method
+  | DHost of (ctx -> value list -> value)
+
+and lifecycle = {
+  start          : ctx -> unit;
+  shutdown       : ctx -> exit_reason -> unit;
+  start_requires : ident list;
+}
+
+and exit_reason = ExNormal | ExRaised of dilang_error | ExPanicked
+
+and wiring = {
+  default_scope        : ident;
+  entries              : (ident * Ast.expr * ident) list;
+  ctx_at_construction  : ctx;
+}
+```
+
+### Environment and context
+
+```ocaml
+(* lib/semantics/env.ml *)
+
+type env = {
+  values : (ident * value ref) list;        (* lexical lookup, LIFO *)
+  caps   : cap_env;
+}
+
+and cap_env = cap_frame list                (* innermost first *)
+
+and cap_frame = {
+  scope    : ident;                          (* "Process", "Request", ... *)
+  bindings : (ident * impl_value) list;     (* lexical order; later wins *)
+  switch   : Eio.Switch.t;                  (* this frame's switch *)
+}
+
+(* lib/runtime/sched.ml *)
+
+type ctx = {
+  prog       : Program.tables;
+  env        : env;
+  defers     : (unit -> unit) list ref;     (* per-activation *)
+  sw         : Eio.Switch.t;                (* innermost switch *)
+  sw_process : Eio.Switch.t;                (* top-level switch for spawn *)
+  stdenv     : Eio_unix.Stdenv.base;
+  yield_to   : value Eio.Stream.t option;   (* set inside stream { ... } *)
+}
+```
+
+### Control-flow exceptions
+
+```ocaml
+(* lib/semantics/error.ml *)
+
+exception Return_exn   of value
+exception Dilang_error of { tag : string; payload : value list }
+exception Cancelled                          (* normalized Eio.Cancel.Cancelled *)
+exception Panic        of string
+exception Break_exn
+exception Continue_exn
+```
+
+### Key module signatures
+
+```ocaml
+(* lib/syntax/parser.mli *)
+val parse_file : string -> Ast.program
+
+(* lib/semantics/resolve.mli *)
+val resolve : Ast.program -> Program.tables
+(* builds caps/traits/structs/enums/impls indexes, rewrites Call→CapCall
+   where the receiver is a declared capability, computes extends-closures *)
+
+(* lib/semantics/eval.mli *)
+val eval     : ctx -> Ast.expr -> value
+val call_fn  : ctx -> fn_value -> value list -> value
+val dispatch : ctx -> impl_value -> string -> value list -> value
+
+(* lib/semantics/lifecycle.mli *)
+val eval_provide_block :
+  ctx -> scope:ident option -> entries:Ast.provide_entry list ->
+  body:Ast.expr -> value
+
+val topo_sort_starts :
+  (ident * impl_value) list -> (ident * impl_value) list
+
+(* lib/runtime/stream.mli *)
+val spawn_stream : ctx -> Ast.expr -> stream_handle
+val take         : stream_handle -> value option
+
+(* lib/stdlib/register.mli *)
+val register_constructor : string -> (ctx -> value list -> impl_value) -> unit
+val lookup_constructor   : string -> (ctx -> value list -> impl_value) option
+val builtin_intrinsics   : (string * (ctx -> value list -> value)) list
+(* `print`, `assert`, `panic`, plus Stage-12 `with_cancel` / `with_timeout` etc. *)
+```
+
+### The CLI
+
+```ocaml
+(* bin/main.ml *)
+
+let () =
+  match Sys.argv with
+  | [| _; "run"; path |] ->
+      Eio_main.run @@ fun env ->
+        Eio.Switch.run @@ fun sw ->
+          let prog   = Parser.parse_file path in
+          let tables = Resolve.resolve prog in
+          let ctx    = Sched.make_root ~prog:tables ~sw ~stdenv:env in
+          let main_fn = Program.find_main tables in
+          ignore (Eval.call_fn ctx main_fn [])
+
+  | [| _; "test"; path |] ->
+      let prog   = Parser.parse_file path in
+      let tables = Resolve.resolve prog in
+      List.iter run_test (Program.tests tables)
+      (* each `run_test` opens Eio_mock.Backend.run with a fresh ctx *)
+
+  | _ -> usage ()
+```
+
+### Sizing
+
+Rough lines-of-code estimate when all 14 stages are done:
+
+| Area                       | LoC (rough)                  |
+|----------------------------|------------------------------|
+| AST + parser glue          | 400–600                      |
+| Resolve pass               | 200–300                      |
+| Eval                       | 800–1200                     |
+| Lifecycle + switch wiring  | 200–300                      |
+| Stream / defer / cancel    | 200–300                      |
+| Host stdlib                | 1500–2000                    |
+| Tests                      | 500+ as examples accumulate  |
+| **Total**                  | **~4000–5000 OCaml**         |
+
+Most of that lives in the host stdlib, not the interpreter core. The interpreter core is ~2k lines; everything else is "make playground programs runnable" work.
+
+-----
+
 ## Cross-cutting: project layout
 
 ```
