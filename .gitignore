@@ -1,0 +1,5 @@
+# Claude Code local settings
+.claude/
+
+# Zed extension dev-install cache (created at install time, not source)
+dilang-zed/grammars/
