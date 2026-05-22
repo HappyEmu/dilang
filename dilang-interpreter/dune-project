@@ -1,0 +1,16 @@
+(lang dune 3.0)
+(using menhir 2.1)
+
+(generate_opam_files true)
+
+(package
+ (name dilang)
+ (synopsis "Dilang tree-walking interpreter")
+ (depends
+  (ocaml (>= 5.0))
+  (dune (>= 3.0))
+  menhir
+  menhirLib
+  sedlex
+  eio_main
+  alcotest))

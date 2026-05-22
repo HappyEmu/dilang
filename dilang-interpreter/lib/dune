@@ -1,0 +1,7 @@
+(library
+ (name dilang)
+ (libraries menhirLib sedlex eio eio_main)
+ (preprocess (pps sedlex.ppx)))
+
+(menhir
+ (modules parser))

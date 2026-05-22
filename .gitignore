@@ -3,3 +3,6 @@
 
 # Zed extension dev-install cache (created at install time, not source)
 dilang-zed/grammars/
+
+# OCaml/dune build artifacts
+dilang-interpreter/_build/

@@ -1,0 +1,6 @@
+(test
+ (name run_test)
+ (libraries dilang alcotest)
+ (deps
+  (source_tree stages)
+  (source_tree expect)))
