@@ -1,0 +1,4 @@
+pos
+non-pos
+lucky
+10

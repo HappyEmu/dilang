@@ -2,6 +2,7 @@ open Ast
 open Value
 
 exception Return_exn of value
+exception Dilang_error of { tag : string; payload : value list }
 
 let type_err msg = failwith ("type error: " ^ msg)
 
@@ -27,6 +28,24 @@ let rec eval_binop op a b =
   | Geq, VInt x, VInt y -> VBool (Int64.compare x y >= 0)
   | _ -> type_err "binop operands"
 
+let rec match_pattern env pat v =
+  match pat, v with
+  | PWild, _ -> Some env
+  | PVar name, _ -> Some (Env.extend env name v)
+  | PVariant { tag; sub }, VEnum { tag = vtag; payload; _ }
+      when String.equal tag vtag && List.length sub = List.length payload ->
+      let rec fold env subs payloads =
+        match subs, payloads with
+        | [], [] -> Some env
+        | sp :: rest_s, pv :: rest_p ->
+            (match match_pattern env sp pv with
+             | Some env' -> fold env' rest_s rest_p
+             | None -> None)
+        | _ -> None
+      in
+      fold env sub payload
+  | _ -> None
+
 let rec eval (ctx : ctx) = function
   | Lit (LInt n)  -> VInt n
   | Lit (LStr s)  -> VStr s
@@ -39,12 +58,18 @@ let rec eval (ctx : ctx) = function
          check inside the constructor closure with a clear message. *)
       (try Env.lookup ctx.env x
        with Failure _ ->
-         (match Hashtbl.find_opt ctx.user_constructors x with
-          | Some ctor -> VImpl (ctor [])
+         (match Hashtbl.find_opt ctx.variants x with
+          | Some (enum_name, variant) when variant.v_payload = [] ->
+              VEnum { ty = enum_name; tag = x; payload = [] }
+          | Some _ ->
+              failwith ("variant " ^ x ^ " requires payload arguments")
           | None ->
-              (match Hashtbl.find_opt ctx.host_constructors x with
-               | Some ctor -> VImpl (ctor [])
-               | None      -> failwith ("unbound name: " ^ x))))
+            (match Hashtbl.find_opt ctx.user_constructors x with
+             | Some ctor -> VImpl (ctor [])
+             | None ->
+                (match Hashtbl.find_opt ctx.host_constructors x with
+                 | Some ctor -> VImpl (ctor [])
+                 | None      -> failwith ("unbound name: " ^ x)))))
   | Let { name; mut = _; rhs; body } ->
       let v = eval ctx rhs in
       let env' = Env.extend ctx.env name v in
@@ -58,11 +83,22 @@ let rec eval (ctx : ctx) = function
   | Call { fn = Var name; args } ->
       (* DEC-009: `Foo(args)` is a function call only. Struct/impl
          construction uses `Foo { field: value }` (or bare `Foo` for
-         fieldless), handled by Var/StructLit. *)
+         fieldless), handled by Var/StructLit. Variant construction also
+         flows through here: fns → variants → fail. *)
       let argv = List.map (eval ctx) args in
       (match Hashtbl.find_opt ctx.fns name with
        | Some f -> call_fn ctx f argv
-       | None   -> failwith ("unknown function: " ^ name))
+       | None ->
+           (match Hashtbl.find_opt ctx.variants name with
+            | Some (enum_name, variant) ->
+                let expected = List.length variant.v_payload in
+                let got = List.length argv in
+                if expected <> got then
+                  failwith (Printf.sprintf
+                    "variant %s expects %d argument(s), got %d"
+                    name expected got);
+                VEnum { ty = enum_name; tag = name; payload = argv }
+            | None -> failwith ("unknown function: " ^ name)))
   | Call _ ->
       failwith "first-class function calls not supported in Stage 1"
   | BinOp (op, a, b) ->
@@ -78,6 +114,56 @@ let rec eval (ctx : ctx) = function
         | SInterp e -> Buffer.add_string b (Value.to_display (eval ctx e))
       ) parts;
       VStr (Buffer.contents b)
+  | If { cond; then_; else_ } ->
+      (match eval ctx cond with
+       | VBool true  -> eval ctx then_
+       | VBool false ->
+           (match else_ with
+            | Some e -> eval ctx e
+            | None   -> VUnit)
+       | _ -> type_err "if condition not Bool")
+  | Raise { variant; payload } ->
+      let payload_vs = List.map (eval ctx) payload in
+      raise (Dilang_error { tag = variant; payload = payload_vs })
+  | Try { body; arms } ->
+      (try eval ctx body
+       with Dilang_error { tag; payload } ->
+         let ty =
+           match Hashtbl.find_opt ctx.variants tag with
+           | Some (enum_name, _) -> enum_name
+           | None -> "<error>"
+         in
+         let v = VEnum { ty; tag; payload } in
+         let rec dispatch = function
+           | [] -> raise (Dilang_error { tag; payload })   (* re-raise *)
+           | (pat, arm) :: rest ->
+               (match match_pattern ctx.env pat v with
+                | Some env' -> eval { ctx with env = env' } arm
+                | None      -> dispatch rest)
+         in
+         dispatch arms)
+  | NullCoalesce (lhs, rhs) ->
+      (match eval ctx lhs with
+       | VEnum { ty = "Option"; tag = "Some"; payload = [v] } -> v
+       | VEnum { ty = "Option"; tag = "None"; _ }             -> eval ctx rhs
+       | _ -> type_err "?? lhs not an Option")
+  | OptChain { recv; name } ->
+      (* §12.1: "chains do not nest Option" — if the loaded field is already
+         an Option, pass it through; otherwise wrap in Some.
+         Stage-10 TODO: extend with `?.method(args)` once value-method
+         dispatch lands (currently only capability-style dispatch exists). *)
+      (match eval ctx recv with
+       | VEnum { ty = "Option"; tag = "Some"; payload = [VImpl iv] } ->
+           let v =
+             match List.assoc_opt name iv.fields with
+             | Some r -> !r
+             | None   -> failwith ("no field " ^ name ^ " on " ^ iv.ty)
+           in
+           (match v with
+            | VEnum { ty = "Option"; _ } -> v
+            | _ -> VEnum { ty = "Option"; tag = "Some"; payload = [v] })
+       | VEnum { ty = "Option"; tag = "None"; _ } as none -> none
+       | _ -> type_err "?. recv not Option<Impl>")
   | Provide { entries; scope; body = Some b } ->
       Eio.Switch.run @@ fun sw ->
       let scope_name = Option.value scope ~default:"Process" in

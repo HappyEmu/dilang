@@ -4,6 +4,7 @@ type value =
   | VInt  of int64
   | VStr  of string
   | VImpl of impl_value
+  | VEnum of { ty : Ast.type_name; tag : string; payload : value list }
 
 and impl_value = {
   ty      : Ast.type_name;
@@ -40,6 +41,8 @@ and ctx = {
   struct_decls      : (Ast.ident, Ast.struct_decl) Hashtbl.t;
   user_constructors : (Ast.ident, (Ast.ident * value) list -> impl_value) Hashtbl.t;
   ext_of            : (Ast.ident, Ast.ident list) Hashtbl.t;
+  enum_decls        : (Ast.type_name, Ast.enum_decl) Hashtbl.t;
+  variants          : (Ast.ident, Ast.type_name * Ast.enum_variant) Hashtbl.t;
 }
 
 let with_cap_env (iv : impl_value) caps : impl_value = { iv with cap_env = caps }
@@ -49,9 +52,12 @@ let emit_line sink s =
   | OutChan oc -> output_string oc s; output_char oc '\n'; flush oc
   | Buf b      -> Buffer.add_string b s; Buffer.add_char b '\n'
 
-let to_display = function
+let rec to_display = function
   | VUnit   -> "()"
   | VBool b -> string_of_bool b
   | VInt  i -> Int64.to_string i
   | VStr  s -> s
   | VImpl i -> "<impl " ^ i.ty ^ ">"
+  | VEnum { tag; payload = []; _ } -> tag
+  | VEnum { tag; payload; _ } ->
+      tag ^ "(" ^ String.concat ", " (List.map to_display payload) ^ ")"

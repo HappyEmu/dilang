@@ -21,11 +21,18 @@ let keyword_or_ident s =
   | "capability" -> CAPABILITY
   | "provide"    -> PROVIDE
   | "requires"   -> REQUIRES
+  | "raises"     -> RAISES
   | "in"         -> IN
   | "struct"     -> STRUCT
   | "impl"       -> IMPL
   | "for"        -> FOR
   | "extends"    -> EXTENDS
+  | "if"         -> IF
+  | "else"       -> ELSE
+  | "enum"       -> ENUM
+  | "raise"      -> RAISE
+  | "try"        -> TRY
+  | "catch"      -> CATCH
   | "true"       -> BOOL true
   | "false"      -> BOOL false
   | _            -> IDENT s
@@ -90,6 +97,9 @@ let rec token buf =
   | "!="   -> BANGEQ
   | "<="   -> LEQ
   | ">="   -> GEQ
+  | "??"   -> QMARK_QMARK
+  | "?."   -> QMARK_DOT
+  | '?'    -> QMARK
   | '+'    -> PLUS
   | '-'    -> MINUS
   | '*'    -> STAR

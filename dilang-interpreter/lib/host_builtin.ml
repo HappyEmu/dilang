@@ -34,6 +34,25 @@ let stdout_greeter fs : impl_value =
     ];
   }
 
+(* Register `Option<T>` as a stdlib enum. Type parameter `T` is recorded but
+   not enforced — the interpreter is monomorphic. Some/None reach the AST via
+   the same path as user variants (Call/Var → variants), so no parser special
+   case is needed. *)
+let register_enums (ctx : ctx) =
+  let option_enum : Ast.enum_decl = {
+    e_name = "Option";
+    e_params = ["T"];
+    e_variants = [
+      { v_name = "Some"; v_payload = [("value", "T")] };
+      { v_name = "None"; v_payload = [] };
+    ];
+  } in
+  Hashtbl.replace ctx.enum_decls "Option" option_enum;
+  List.iter (fun (v : Ast.enum_variant) ->
+    Hashtbl.replace ctx.variants v.v_name ("Option", v)
+  ) option_enum.e_variants
+
 let register (ctx : ctx) =
   Hashtbl.replace ctx.host_constructors "StdoutLogger"  stdout_logger;
-  Hashtbl.replace ctx.host_constructors "StdoutGreeter" stdout_greeter
+  Hashtbl.replace ctx.host_constructors "StdoutGreeter" stdout_greeter;
+  register_enums ctx

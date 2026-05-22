@@ -208,6 +208,69 @@ let stress_many_fields () =
   Buffer.add_char expected '\n';
   Alcotest.(check string) "many fields" (Buffer.contents expected) out
 
+let stress_deep_if_else () =
+  (* 60 levels of `if ... else if ...` chained; only the deepest branch matches. *)
+  let n = 60 in
+  let b = Buffer.create (64 * n + 64) in
+  Buffer.add_string b "fn main() {\n    let x = 60\n    let r = if x == 0 { 0 }";
+  for i = 1 to n - 1 do
+    Buffer.add_string b (Printf.sprintf " else if x == %d { %d }" i i)
+  done;
+  Buffer.add_string b " else { 999 }\n    print(r)\n}\n";
+  let out = run_string (Buffer.contents b) in
+  Alcotest.(check string) "deep if/else if" "999\n" out
+
+let stress_deep_raise () =
+  (* Recursion ~50 frames deep; innermost raise; single outer try. *)
+  let n = 50 in
+  let b = Buffer.create 1024 in
+  Buffer.add_string b "enum E { Boom(d: I64) }\n";
+  Buffer.add_string b
+    (Printf.sprintf
+       "fn descend(d: I64) -> I64 raises {E} {\n\
+       \    if d == %d { raise Boom(d) }\n\
+       \    descend(d + 1)\n\
+       }\n" n);
+  Buffer.add_string b
+    "fn main() {\n\
+    \    try {\n\
+    \        let _r = descend(0)\n\
+    \        print(\"nope\")\n\
+    \    } catch {\n\
+    \        Boom(depth) -> print(\"boom at ${depth}\")\n\
+    \    }\n\
+    }\n";
+  let out = run_string (Buffer.contents b) in
+  Alcotest.(check string) "deep raise" (Printf.sprintf "boom at %d\n" n) out
+
+let stress_long_optchain () =
+  (* Chain `?.next` 10 deep through optional-field-yielding structs.
+     Stage-5 only supports single-step ?. (no nested at parse, but eval
+     handles a flattened chain via repeated wrapping). *)
+  let n = 6 in
+  let b = Buffer.create 2048 in
+  for i = 0 to n - 1 do
+    Buffer.add_string b
+      (Printf.sprintf "struct N%d { next: N%d? }\n" i (i + 1))
+  done;
+  Buffer.add_string b (Printf.sprintf "struct N%d { tail: Str? }\n" n);
+  Buffer.add_string b "fn main() {\n";
+  (* build innermost first *)
+  Buffer.add_string b
+    (Printf.sprintf "    let v%d = N%d { tail: Some(\"end\") }\n" n n);
+  for i = n - 1 downto 0 do
+    Buffer.add_string b
+      (Printf.sprintf "    let v%d = N%d { next: Some(v%d) }\n" i i (i + 1))
+  done;
+  (* chain ?.next from v0 down *)
+  Buffer.add_string b "    let r = Some(v0)";
+  for _ = 0 to n - 1 do
+    Buffer.add_string b "?.next"
+  done;
+  Buffer.add_string b "?.tail ?? \"absent\"\n    print(r)\n}\n";
+  let out = run_string (Buffer.contents b) in
+  Alcotest.(check string) "long optchain" "end\n" out
+
 let stress_interpolation () =
   let n = 200 in
   let b = Buffer.create (40 * n) in
@@ -361,6 +424,42 @@ let neg_undeclared_field () =
          \    }\n\
          }\n")
 
+let neg_unknown_variant_in_catch () =
+  check_raises_substr "unknown variant" "uncaught raise: A"
+    (fun () ->
+      run_string
+        "enum E { A }\n\
+         fn main() {\n\
+         \    try { raise A } catch { Bogus -> print(\"never\") }\n\
+         }\n")
+
+let neg_unmatched_catch_propagates () =
+  check_raises_substr "unmatched catch" "uncaught raise: A"
+    (fun () ->
+      run_string
+        "enum E { A, B }\n\
+         fn inner() { try { raise A } catch { B -> print(\"never\") } }\n\
+         fn main() { inner() }\n")
+
+let neg_coalesce_lhs_not_option () =
+  check_raises_substr "?? lhs not Option" "?? lhs not an Option"
+    (fun () ->
+      run_string
+        "fn main() { print(42 ?? \"fallback\") }\n")
+
+let neg_if_cond_not_bool () =
+  check_raises_substr "if cond not Bool" "if condition not Bool"
+    (fun () ->
+      run_string
+        "fn main() { if 1 { print(\"x\") } }\n")
+
+let neg_some_arity () =
+  check_raises_substr "Some arity"
+    "variant Some expects 1 argument(s), got 2"
+    (fun () ->
+      run_string
+        "fn main() { print(Some(1, 2)) }\n")
+
 let neg_field_on_non_impl () =
   check_raises_substr "field on non-impl" "field access on non-impl value"
     (fun () ->
@@ -399,6 +498,13 @@ let () =
       ; Alcotest.test_case "04f_multi_impl"       `Quick (stage_test ~name:"04f_multi_impl")
       ; Alcotest.test_case "04g_provided_with_arg" `Quick (stage_test ~name:"04g_provided_with_arg")
       ]
+    ; "stage5",
+      [ Alcotest.test_case "05_errors"     `Quick (stage_test ~name:"05_errors")
+      ; Alcotest.test_case "05b_if_else"   `Quick (stage_test ~name:"05b_if_else")
+      ; Alcotest.test_case "05c_option"    `Quick (stage_test ~name:"05c_option")
+      ; Alcotest.test_case "05d_re_raise"  `Quick (stage_test ~name:"05d_re_raise")
+      ; Alcotest.test_case "05e_re_tag"    `Quick (stage_test ~name:"05e_re_tag")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -410,6 +516,9 @@ let () =
       ; Alcotest.test_case "wide_provide_chain"    `Quick stress_wide_provide_chain
       ; Alcotest.test_case "many_fields_20"        `Quick stress_many_fields
       ; Alcotest.test_case "interpolation_200"     `Quick stress_interpolation
+      ; Alcotest.test_case "deep_if_else_60"       `Quick stress_deep_if_else
+      ; Alcotest.test_case "deep_raise_50"         `Quick stress_deep_raise
+      ; Alcotest.test_case "long_optchain"         `Quick stress_long_optchain
       ]
     ; "errors",
       [ Alcotest.test_case "cap_not_in_scope"    `Quick neg_cap_not_in_scope
@@ -425,5 +534,10 @@ let () =
       ; Alcotest.test_case "missing_impl_method"   `Quick neg_missing_impl_method
       ; Alcotest.test_case "undeclared_field"      `Quick neg_undeclared_field
       ; Alcotest.test_case "field_on_non_impl"     `Quick neg_field_on_non_impl
+      ; Alcotest.test_case "unknown_variant_catch" `Quick neg_unknown_variant_in_catch
+      ; Alcotest.test_case "unmatched_catch"       `Quick neg_unmatched_catch_propagates
+      ; Alcotest.test_case "coalesce_lhs_not_opt"  `Quick neg_coalesce_lhs_not_option
+      ; Alcotest.test_case "if_cond_not_bool"      `Quick neg_if_cond_not_bool
+      ; Alcotest.test_case "some_arity"            `Quick neg_some_arity
       ]
     ]

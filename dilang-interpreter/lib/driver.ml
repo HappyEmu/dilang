@@ -26,6 +26,7 @@ let build_tables prog =
   let caps = Hashtbl.create 8 in
   let structs = Hashtbl.create 8 in
   let impls_by_ty : (Ast.ident, Ast.impl_decl list) Hashtbl.t = Hashtbl.create 8 in
+  let enums : (Ast.type_name, Ast.enum_decl) Hashtbl.t = Hashtbl.create 8 in
   List.iter (function
     | Ast.DFn f     -> Hashtbl.replace fns f.name f
     | Ast.DCap c    -> Hashtbl.replace caps c.c_name c
@@ -33,8 +34,9 @@ let build_tables prog =
     | Ast.DImpl i   ->
         let prev = try Hashtbl.find impls_by_ty i.for_ty with Not_found -> [] in
         Hashtbl.replace impls_by_ty i.for_ty (i :: prev)
+    | Ast.DEnum e   -> Hashtbl.replace enums e.e_name e
   ) prog;
-  fns, caps, structs, impls_by_ty
+  fns, caps, structs, impls_by_ty, enums
 
 (* BFS closure of the `extends` relation, including the cap itself. *)
 let compute_ext_of (cap_decls : (Ast.ident, Ast.cap_decl) Hashtbl.t)
@@ -97,8 +99,13 @@ let make_user_constructor (s : Ast.struct_decl) methods
     in
     { Value.ty = s.s_name; methods = dispatch; fields; cap_env = [] }
 
+let format_payload (vs : Value.value list) =
+  match vs with
+  | [] -> ""
+  | _  -> "(" ^ String.concat ", " (List.map Value.to_display vs) ^ ")"
+
 let run_program ?(sink = Value.OutChan stdout) prog =
-  let fns, cap_decls, struct_decls, impls_by_ty = build_tables prog in
+  let fns, cap_decls, struct_decls, impls_by_ty, user_enums = build_tables prog in
   let main =
     match Hashtbl.find_opt fns "main" with
     | Some f -> f
@@ -111,6 +118,8 @@ let run_program ?(sink = Value.OutChan stdout) prog =
     let methods = methods_for_ty impls_by_ty ty in
     Hashtbl.replace user_constructors ty (make_user_constructor s methods)
   ) struct_decls;
+  let enum_decls = Hashtbl.create 8 in
+  let variants = Hashtbl.create 16 in
   let ctx : Value.ctx = {
     env  = Env.empty;
     fns;
@@ -121,9 +130,31 @@ let run_program ?(sink = Value.OutChan stdout) prog =
     struct_decls;
     user_constructors;
     ext_of;
+    enum_decls;
+    variants;
   } in
+  (* Host stdlib first — registers Option<T> with Some/None in variants. Any
+     user enum re-declaring Some/None is rejected below as a duplicate. *)
   Host_builtin.register ctx;
-  ignore (Eval.call_fn ctx main [])
+  Hashtbl.iter (fun enum_name (decl : Ast.enum_decl) ->
+    if enum_name = "Option" then
+      failwith "enum Option is reserved by the host stdlib"
+    else begin
+      Hashtbl.replace ctx.enum_decls enum_name decl;
+      List.iter (fun (v : Ast.enum_variant) ->
+        match Hashtbl.find_opt ctx.variants v.v_name with
+        | Some (other_enum, _) ->
+            failwith (Printf.sprintf
+              "duplicate variant tag: %s (also defined in enum %s)"
+              v.v_name other_enum)
+        | None ->
+            Hashtbl.replace ctx.variants v.v_name (enum_name, v)
+      ) decl.e_variants
+    end
+  ) user_enums;
+  try ignore (Eval.call_fn ctx main [])
+  with Eval.Dilang_error { tag; payload } ->
+    failwith ("uncaught raise: " ^ tag ^ format_payload payload)
 
 let run_file ?(sink = Value.OutChan stdout) path =
   Eio_main.run @@ fun _env ->

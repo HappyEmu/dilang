@@ -24,6 +24,11 @@ type expr =
   | Provide of { entries : provide_entry list; scope : ident option; body : expr option }
   | FieldGet of { recv : expr; name : ident }
   | StructLit of { ty : type_name; fields : (ident * expr) list }
+  | If           of { cond : expr; then_ : expr; else_ : expr option }
+  | Raise        of { variant : ident; payload : expr list }
+  | Try          of { body : expr; arms : (pattern * expr) list }
+  | NullCoalesce of expr * expr
+  | OptChain     of { recv : expr; name : ident }
 
 and string_part =
   | SLit of string
@@ -32,6 +37,11 @@ and string_part =
 and provide_entry =
   | Binding of { cap : ident; rhs : expr; scope : ident }
   | Using   of expr list                            (* Stage 9 — parser never emits this yet *)
+
+and pattern =
+  | PWild
+  | PVar     of ident
+  | PVariant of { tag : string; sub : pattern list }
 
 type block_item =
   | BLet of { name : ident; mut : bool; rhs : expr }
@@ -89,10 +99,14 @@ type fn_decl = {
   body     : expr;
 }
 
+type enum_variant = { v_name : ident; v_payload : (ident * type_name) list }
+type enum_decl    = { e_name : type_name; e_params : ident list; e_variants : enum_variant list }
+
 type decl =
   | DFn     of fn_decl
   | DCap    of cap_decl
   | DStruct of struct_decl
   | DImpl   of impl_decl
+  | DEnum   of enum_decl
 
 type program = decl list
