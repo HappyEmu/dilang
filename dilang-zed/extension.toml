@@ -13,4 +13,4 @@ repository = "https://github.com/HappyEmu/dilang"
 #   3. bump the submodule pointer in the dilang repo
 [grammars.dilang]
 repository = "https://github.com/HappyEmu/tree-sitter-dilang"
-commit = "ff65adfc780bc417849970a71283d88d4117c65f"
+commit = "b8d8350698773e8f1b6622059a930de1ee60a3e4"
