@@ -1648,7 +1648,7 @@ Most of that lives in the host stdlib, not the interpreter core. The interpreter
 ## Cross-cutting: project layout
 
 ```
-dilang-interpreter/                       (* new repo, sibling of dilang-zed *)
+dilang-interpreter/                       (* new folder at the repo root, alongside dilang-zed/ *)
   dune-project
   dilang.opam
   bin/
