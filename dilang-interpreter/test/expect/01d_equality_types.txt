@@ -1,0 +1,21 @@
+true
+false
+true
+true
+false
+true
+true
+false
+true
+true
+false
+true
+true
+true
+tab	here
+quoted: "hello"
+backslash: \
+newline:
+after
+
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

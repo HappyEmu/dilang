@@ -1,0 +1,4 @@
+boot: starting (count=3)
+boot: computed = 7
+plain line, length ~ 30
+boot

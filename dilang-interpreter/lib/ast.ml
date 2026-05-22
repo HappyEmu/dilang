@@ -20,10 +20,16 @@ type expr =
   | BinOp of bin_op * expr * expr
   | Return of expr
   | StringInterp of string_part list
+  | CapCall of { cap : ident; method_ : ident; args : expr list }
+  | Provide of { entries : provide_entry list; scope : ident option; body : expr option }
 
 and string_part =
   | SLit of string
   | SInterp of expr
+
+and provide_entry =
+  | Binding of { cap : ident; rhs : expr; scope : ident }
+  | Using   of expr list                            (* Stage 9 — parser never emits this yet *)
 
 type block_item =
   | BLet of { name : ident; mut : bool; rhs : expr }
@@ -42,14 +48,27 @@ let block_of_items items =
   in
   go items
 
+type cap_method_sig = {
+  m_name   : ident;
+  m_params : (ident * type_name) list;
+  m_ret    : type_name option;
+}
+
+type cap_decl = {
+  c_name    : ident;
+  c_methods : cap_method_sig list;
+}
+
 type fn_decl = {
-  name   : ident;
-  params : (ident * type_name) list;
-  ret    : type_name option;
-  body   : expr;
+  name     : ident;
+  params   : (ident * type_name) list;
+  ret      : type_name option;
+  requires : ident list;
+  body     : expr;
 }
 
 type decl =
-  | DFn of fn_decl
+  | DFn  of fn_decl
+  | DCap of cap_decl
 
 type program = decl list

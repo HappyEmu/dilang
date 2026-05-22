@@ -1,0 +1,10 @@
+outer start with alice
+hi, alice
+deep saw: alice
+WARN: deep is warning about alice
+outer end with alice
+outer start with bob
+hi, bob
+deep saw: bob
+WARN: deep is warning about bob
+outer end with bob

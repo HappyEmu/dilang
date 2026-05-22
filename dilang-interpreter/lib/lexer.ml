@@ -14,13 +14,17 @@ let line_comment = [%sedlex.regexp? "//", Star (Compl ('\n' | '\r'))]
 
 let keyword_or_ident s =
   match s with
-  | "fn"     -> FN
-  | "let"    -> LET
-  | "mut"    -> MUT
-  | "return" -> RETURN
-  | "true"   -> BOOL true
-  | "false"  -> BOOL false
-  | _        -> IDENT s
+  | "fn"         -> FN
+  | "let"        -> LET
+  | "mut"        -> MUT
+  | "return"     -> RETURN
+  | "capability" -> CAPABILITY
+  | "provide"    -> PROVIDE
+  | "requires"   -> REQUIRES
+  | "in"         -> IN
+  | "true"       -> BOOL true
+  | "false"      -> BOOL false
+  | _            -> IDENT s
 
 (* Read the source of an interpolation expression from `buf`, starting just
    after the opening `${`. Balances braces, respects nested string literals,
@@ -95,6 +99,8 @@ let rec token buf =
   | '}'    -> RBRACE
   | ','    -> COMMA
   | ':'    -> COLON
+  | '@'    -> AT
+  | '.'    -> DOT
   | eof    -> EOF
   | _      ->
       let s = Sedlexing.Utf8.lexeme buf in

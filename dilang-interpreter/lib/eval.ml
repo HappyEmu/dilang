@@ -3,21 +3,6 @@ open Value
 
 exception Return_exn of value
 
-type sink =
-  | OutChan of out_channel
-  | Buf     of Buffer.t
-
-let emit_line sink s =
-  match sink with
-  | OutChan oc -> output_string oc s; output_char oc '\n'; flush oc
-  | Buf b      -> Buffer.add_string b s; Buffer.add_char b '\n'
-
-type ctx = {
-  env  : Env.t;
-  fns  : (ident, fn_decl) Hashtbl.t;
-  sink : sink;
-}
-
 let type_err msg = failwith ("type error: " ^ msg)
 
 let rec eval_binop op a b =
@@ -42,7 +27,7 @@ let rec eval_binop op a b =
   | Geq, VInt x, VInt y -> VBool (Int64.compare x y >= 0)
   | _ -> type_err "binop operands"
 
-let rec eval ctx = function
+let rec eval (ctx : ctx) = function
   | Lit (LInt n)  -> VInt n
   | Lit (LStr s)  -> VStr s
   | Lit (LBool b) -> VBool b
@@ -59,13 +44,13 @@ let rec eval ctx = function
       List.iter (fun v -> emit_line ctx.sink (Value.to_display v)) vs;
       VUnit
   | Call { fn = Var name; args } ->
-      let f =
-        match Hashtbl.find_opt ctx.fns name with
-        | Some f -> f
-        | None   -> failwith ("unknown function: " ^ name)
-      in
       let argv = List.map (eval ctx) args in
-      call_fn ctx f argv
+      (match Hashtbl.find_opt ctx.fns name with
+       | Some f -> call_fn ctx f argv
+       | None ->
+           (match Hashtbl.find_opt ctx.host_constructors name with
+            | Some ctor -> VImpl (ctor argv)
+            | None      -> failwith ("unknown function: " ^ name)))
   | Call _ ->
       failwith "first-class function calls not supported in Stage 1"
   | BinOp (op, a, b) ->
@@ -81,8 +66,35 @@ let rec eval ctx = function
         | SInterp e -> Buffer.add_string b (Value.to_display (eval ctx e))
       ) parts;
       VStr (Buffer.contents b)
+  | Provide { entries; scope; body = Some b } ->
+      Eio.Switch.run @@ fun sw ->
+      let scope_name = Option.value scope ~default:"Process" in
+      let bindings = List.map (fun entry ->
+        match entry with
+        | Binding { cap; rhs; scope = _ } ->
+            (* @ Scope is parsed and stored on the entry as a label, ignored at Stage 3 *)
+            (match eval ctx rhs with
+             | VImpl iv -> (cap, iv)
+             | _ -> failwith ("provide binding for " ^ cap ^ " did not evaluate to an impl"))
+        | Using _ -> failwith "`using` is not supported in Stage 3 (Stage 9)"
+      ) entries in
+      let frame = { scope = scope_name; bindings; switch = sw } in
+      eval { ctx with caps = frame :: ctx.caps } b
+  | Provide { body = None; _ } ->
+      failwith "Wiring values (provide without `in`) are not supported in Stage 3 (Stage 9)"
+  | CapCall { cap; method_; args } ->
+      let impl =
+        match List.find_opt (fun f -> List.mem_assoc cap f.bindings) ctx.caps with
+        | None   -> failwith ("capability " ^ cap ^ " not in scope")
+        | Some f -> List.assoc cap f.bindings
+      in
+      let arg_vs = List.map (eval ctx) args in
+      (match List.assoc_opt method_ impl.methods with
+       | None              -> failwith ("capability " ^ cap ^ " has no method " ^ method_)
+       | Some (DHost f)    -> f ctx arg_vs
+       | Some (DUser _)    -> failwith "user impls not supported in Stage 3")
 
-and call_fn ctx f args =
+and call_fn (ctx : ctx) (f : fn_decl) args =
   if List.length f.params <> List.length args then
     failwith ("arity mismatch calling " ^ f.name);
   let env0 =
