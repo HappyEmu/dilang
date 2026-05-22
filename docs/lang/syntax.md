@@ -10,7 +10,7 @@ For the *why* behind these shapes, see [design.md](./design.md). For programs th
 
 ### 1.1 Declarations
 
-```
+```di
 fn add(a: I64, b: I64) -> I64 {
     a + b
 }
@@ -28,7 +28,7 @@ pub fn lookup_user(id: Uuid) -> User
 
 A function declaration has shape:
 
-```
+```di
 [pub] fn name<generics>(params) -> ReturnType
     [requires {...}]
     [raises   {...}]
@@ -42,7 +42,7 @@ The two effect-row clauses are optional and default to `{}`. `pub` is a row-chec
 
 Function types appear in fields, parameters, and type aliases. The leading `fn` is required.
 
-```
+```di
 type Handler = fn(Request) -> Response
     requires {Database, Logger, RequestCtx}
     raises   {}
@@ -57,7 +57,7 @@ A function value carries its capability requirements; calling it requires those 
 
 ### 1.3 Closures
 
-```
+```di
 let add_one = |x| x + 1
 let log_and_run = |name, f| { Logger.info(name); f() }
 ```
@@ -70,7 +70,7 @@ Closures infer rows from their bodies. When stored or passed, the inferred rows 
 
 ### 2.1 Declarations
 
-```
+```di
 capability Logger {
     fn info(msg: Str, fields: Map<Str, Json> = {})
     fn warn(msg: Str, fields: Map<Str, Json> = {})
@@ -85,7 +85,7 @@ capability Logger {
 
 Shape:
 
-```
+```di
 capability Name [@ Scope1 | Scope2] [extends Other1 + Other2] [where bounds] {
     fn required_method(params) -> Return [raises {...}]
     fn defaulted_method(params) -> Return [raises {...}] { body }
@@ -96,7 +96,7 @@ capability Name [@ Scope1 | Scope2] [extends Other1 + Other2] [where bounds] {
 
 ### 2.2 Scope annotations
 
-```
+```di
 capability Clock @ Process { fn now() -> Instant }
 capability RequestCtx @ Request { fn request_id() -> Uuid }
 capability Cache @ Process | Request { fn get(key: Str) -> Bytes? }
@@ -106,7 +106,7 @@ No annotation means the capability may be bound in any scope. `@ A | B` means on
 
 ### 2.3 Composition
 
-```
+```di
 capability ReadDb {
     fn query(sql: Sql) -> Rows raises {DbError}
 }
@@ -124,7 +124,7 @@ A `WriteDb` impl satisfies a `ReadDb` requirement.
 
 Traits and capabilities share syntactic shape but differ in resolution: traits resolve by receiver value, capabilities resolve through `provide` blocks.
 
-```
+```di
 trait Iterator<T> {
     fn next() -> T?
     fn close()
@@ -148,7 +148,7 @@ Traits cannot appear in `requires` rows; they appear as constraints on generic p
 
 ### 4.1 Basic shape
 
-```
+```di
 impl ReadDb for InMemoryDb {
     fn query(sql: Sql) -> Rows raises {DbError} {
         self.tables.query_in_memory(sql)
@@ -158,7 +158,7 @@ impl ReadDb for InMemoryDb {
 
 Shape:
 
-```
+```di
 impl[<generics>] Cap1 [+ Cap2] for Type[<generics>] [where bounds] {
     [requires {...}]
     fn method(params) -> Return { body }
@@ -169,7 +169,7 @@ impl[<generics>] Cap1 [+ Cap2] for Type[<generics>] [where bounds] {
 
 An impl may declare a private `requires` row — capabilities it needs internally that callers do not see.
 
-```
+```di
 impl ReadDb + WriteDb for Postgres {
     requires {IO, Metrics, Logger}
 
@@ -189,13 +189,13 @@ Callers see `requires {ReadDb}` or `requires {WriteDb}` — not `requires {ReadD
 
 ### 4.3 Multiple conformance
 
-```
+```di
 impl Logger + Metrics for ObservabilityStack { /* ... */ }
 ```
 
 ### 4.4 Generic impls
 
-```
+```di
 impl<T> Iterator<T> for Stream<T> { /* ... */ }
 
 impl<K, V> Cache<K, V> for LruCache<K, V>
@@ -211,7 +211,7 @@ impl<K, V> Cache<K, V> for LruCache<K, V>
 
 Rows are sets written `{...}`. Members can be concrete capabilities, row variables, or `+`-extensions.
 
-```
+```di
 requires {Database, Logger}                  // two concrete caps
 requires {R + Database}                      // row variable R plus Database
 requires {R + S}                             // union of two row variables
@@ -233,7 +233,7 @@ requires {R + S + Metrics}                   // union of two row variables plus 
 
 ### 6.1 Raising
 
-```
+```di
 raise NotFound
 raise BadInput("title is empty")
 ```
@@ -242,7 +242,7 @@ raise BadInput("title is empty")
 
 ### 6.2 Catching
 
-```
+```di
 try fetch_user(id) catch {
     NotFound       -> Response.not_found()
     DbError(e)     -> { Logger.error("db", e); Response.server_error() }
@@ -253,7 +253,7 @@ The catch must be exhaustive over the inner expression's `raises` row, or the ou
 
 ### 6.3 Re-tagging at boundaries
 
-```
+```di
 try Database.query(...) catch DbError(e) -> raise DbFailure(e)
 ```
 
@@ -274,7 +274,7 @@ Entries combine in lexical order; later entries shadow earlier ones on conflict.
 
 ### 7.2 Inline bindings only
 
-```
+```di
 provide {
     Database = Postgres(IO.env("DB_URL") ?? "") @ Process
     Logger   = JsonLogger()                     @ Process
@@ -288,7 +288,7 @@ Every binding specifies its scope with `@ ScopeName`. No defaults.
 
 ### 7.3 Provide targeting a non-Process scope
 
-```
+```di
 provide @ Request {
     RequestCtx = fresh_ctx(req) @ Request
     Tenant     = lookup_tenant(req) @ Request
@@ -301,7 +301,7 @@ provide @ Request {
 
 A `provide { ... }` with no `in` is a value of type `Wiring`.
 
-```
+```di
 fn base_runtime() -> Wiring {
     let rt = FiberRuntime(workers: 8)
     provide {
@@ -314,7 +314,7 @@ fn base_runtime() -> Wiring {
 
 ### 7.5 Composing via `using`
 
-```
+```di
 provide {
     using base_runtime(), pg_repos(),
     TaskRepo = FailingTaskRepo() @ Process,     // overrides the one in pg_repos()
@@ -331,7 +331,7 @@ provide {
 
 ### 8.1 Type parameters with trait bounds
 
-```
+```di
 fn sort<T: Ord>(xs: List<T>) -> List<T> { /* ... */ }
 fn dedup<T: Eq + Hash>(xs: List<T>) -> List<T> { /* ... */ }
 ```
@@ -340,7 +340,7 @@ Capabilities cannot appear as trait bounds — they go in `requires` rows.
 
 ### 8.2 Where clauses
 
-```
+```di
 fn merge<K, V, M>(a: M, b: M) -> M
     where M: Map<K, V>, K: Eq + Hash
 { /* ... */ }
@@ -348,7 +348,7 @@ fn merge<K, V, M>(a: M, b: M) -> M
 
 ### 8.3 Generic structs, enums, traits, capabilities
 
-```
+```di
 struct Cached<T> { value: T, cached_at: Instant }
 
 enum Option<T> {
@@ -370,7 +370,7 @@ capability Cache<K, V> @ Process | Request
 
 Generic parameters that appear only in row positions (`requires {R}`, `raises {E}`) are inferred to be row variables. They cannot carry trait bounds.
 
-```
+```di
 type Handler<R> = fn(Request) -> Response requires {R} raises {}
 
 struct Router<R> { /* ... */ }
@@ -385,7 +385,7 @@ impl<R> Router<R> {
 
 ### 9.1 Declaration
 
-```
+```di
 scope Request
 scope Transaction
 scope HtmlRender
@@ -403,7 +403,7 @@ A capability annotated `@ Request` may only be bound inside `provide @ Request {
 
 ### 10.1 Stream construction
 
-```
+```di
 fn posts_stream(filter: PostFilter) -> Stream<Post>
     requires {PostRepo}
     raises   {DbFailure}
@@ -425,7 +425,7 @@ fn posts_stream(filter: PostFilter) -> Stream<Post>
 
 ### 10.2 Iteration
 
-```
+```di
 for x in some_iterator { process(x) }
 ```
 
@@ -444,14 +444,14 @@ Desugars to a loop calling `.next()` until it returns `None`. The iterator is dr
 
 This lets early-exit forms compose with operators expecting values:
 
-```
+```di
 let user   = RequestCtx.current_user() ?? return Response.unauthorized()
 let header = req.header("X-Tenant")    ?? raise BadInput("missing tenant")
 ```
 
 Functions that never return normally:
 
-```
+```di
 fn panic(msg: Str) -> Never { /* abort */ }
 fn run_forever() -> Never { loop { do_work() } }
 ```
@@ -462,7 +462,7 @@ fn run_forever() -> Never { loop { do_work() } }
 
 `Option<T>` is a stdlib enum with sugar `T?`.
 
-```
+```di
 enum Option<T> { Some(T); None }
 
 let header: Str? = req.header("Authorization")
@@ -470,7 +470,7 @@ let header: Str? = req.header("Authorization")
 
 ### 12.1 Optional chaining
 
-```
+```di
 x?.method(args)        // None if x is None, else Some(x.method(args))
 x?.field
 chain?.foo()?.bar()    // flat-maps; chains do not nest Option
@@ -478,7 +478,7 @@ chain?.foo()?.bar()    // flat-maps; chains do not nest Option
 
 ### 12.2 Null coalescing
 
-```
+```di
 x ?? fallback              // fallback evaluated only if x is None
 
 let user = lookup() ?? raise NotFound
@@ -491,7 +491,7 @@ The right-hand side can have type `Never` (so `?? raise X` and `?? return X` wor
 
 ## 13. Bindings and mutation
 
-```
+```di
 let x = expr            // immutable binding
 let mut x = expr        // mutable binding (reassignable)
 ```
@@ -502,7 +502,7 @@ let mut x = expr        // mutable binding (reassignable)
 
 ## 14. Defer
 
-```
+```di
 fn handle_conn(sock: Socket) requires {IO, Logger} {
     defer IO.close(sock)
     defer Logger.info("connection closed")
@@ -518,7 +518,7 @@ fn handle_conn(sock: Socket) requires {IO, Logger} {
 
 ### 15.1 with_cancel
 
-```
+```di
 IO.with_cancel(|tok| {
     IO.spawn(|| { wait_for_signal(); tok.trip() })
     do_work()
@@ -529,8 +529,8 @@ IO.with_cancel(|tok| {
 
 ### 15.2 with_timeout (stdlib helper)
 
-```
-try with_timeout(2.seconds) {
+```di
+let response = try with_timeout(2.seconds) {
     HttpClient.get(url)
 } catch Timeout -> default_response()
 ```
@@ -539,7 +539,7 @@ Built from `with_cancel` plus a timer that trips the token.
 
 ### 15.3 uncancellable
 
-```
+```di
 uncancellable {
     transaction.commit()
 }
@@ -549,7 +549,7 @@ Cancellation requested during the block raises only after the block exits.
 
 ### 15.4 select
 
-```
+```di
 select {
     a.await() -> handle_a()
     b.await() -> handle_b()
@@ -563,7 +563,7 @@ First arm to fire runs. Others are not implicitly cancelled.
 
 ## 16. Lifecycle
 
-```
+```di
 impl Lifecycle for Postgres {
     requires {IO, Logger}
 
@@ -575,7 +575,10 @@ impl Lifecycle for Postgres {
     fn shutdown(exit: ExitReason) {
         match exit {
             Normal    -> self.pool.drain(timeout: 30.seconds)
-            Raised(e) -> { Logger.warn("draining after error"); self.pool.drain(timeout: 10.seconds) }
+            Raised(e) -> { 
+                Logger.warn("draining after error"); 
+                self.pool.drain(timeout: 10.seconds) 
+            }
             Panicked  -> self.pool.close_all()
         }
     }

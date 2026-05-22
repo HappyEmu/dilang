@@ -14,6 +14,21 @@ The capability-native language. Dependency injection as a first-class language f
 
 When discussing a specific paragraph, use the section path: "§2.3.1 of design" or "syntax §7.4". Examples are referenced by filename and section: "example 01 §10" for the transactions section of the layered backend example.
 
+## Editor support
+
+The [`dilang-zed`](../../dilang-zed/) extension provides Dilang syntax highlighting in [Zed](https://zed.dev). It applies to:
+
+- standalone `.di` files
+- fenced code blocks in Markdown tagged with `di`:
+
+````markdown
+```di
+fn add(a: I64, b: I64) -> I64 { a + b }
+```
+````
+
+All Dilang snippets in this directory use ` ```di ` fences so the same extension highlights them when these docs are read in Zed.
+
 ## Archive
 
 [archive/capability-language-design-v4.md](./archive/capability-language-design-v4.md) — the previous iteration, a single monolithic document. Superseded but useful as historical reference. The main differences in the current iteration:

@@ -10,7 +10,7 @@ For language concepts, see [../design.md](../design.md). For syntax, see [../syn
 
 ## 1. Domain
 
-```
+```di
 struct User { id: Uuid, email: Email, name: Str }
 struct Task { id: Uuid, owner: Uuid, title: Str, done: Bool, created_at: Instant }
 struct CreateTaskInput { title: Str }
@@ -29,7 +29,7 @@ enum AppError {
 
 ### 2.1 Cross-cutting infrastructure
 
-```
+```di
 capability Logger {
     fn info(msg: Str, fields: Map<Str, Json> = {})
     fn warn(msg: Str, fields: Map<Str, Json> = {})
@@ -42,7 +42,7 @@ capability IdGen @ Process { fn next() -> Uuid }
 
 ### 2.2 Database
 
-```
+```di
 capability ReadDb {
     fn query(sql: Sql) -> Rows raises {DbError}
 }
@@ -57,7 +57,7 @@ capability WriteDb extends ReadDb {
 
 The repository layer hides SQL from the service layer.
 
-```
+```di
 capability TaskRepo {
     fn find(id: Uuid) -> Task?            raises {DbFailure}
     fn list_for(owner: Uuid) -> List<Task> raises {DbFailure}
@@ -73,7 +73,7 @@ capability UserRepo {
 
 ### 2.4 Request context
 
-```
+```di
 capability RequestCtx @ Request {
     fn request_id() -> Uuid
     fn current_user() -> User?
@@ -86,7 +86,7 @@ capability RequestCtx @ Request {
 
 The repository impl translates capability calls into SQL. It declares `WriteDb` as a private dependency — callers see only `requires {TaskRepo}`.
 
-```
+```di
 struct PgTaskRepo {}
 
 impl TaskRepo for PgTaskRepo {
@@ -122,7 +122,7 @@ The error re-tag from `DbError` (a low-level SQL error) to `DbFailure` (a domain
 
 An in-memory impl for tests:
 
-```
+```di
 struct InMemoryTaskRepo { tasks: Mutex<Map<Uuid, Task>> }
 
 impl TaskRepo for InMemoryTaskRepo {
@@ -141,7 +141,7 @@ impl TaskRepo for InMemoryTaskRepo {
 
 The service layer orchestrates repositories and applies business rules. It declares the repositories it uses, not the database directly.
 
-```
+```di
 pub fn create_task(owner: Uuid, input: CreateTaskInput) -> Task
     requires {TaskRepo, UserRepo, Logger, Clock, IdGen}
     raises   {BadInput, NotFound, DbFailure}
@@ -196,7 +196,7 @@ Middleware is just a function that takes a handler and returns a handler. Row po
 
 ### 5.1 Request logging
 
-```
+```di
 fn with_request_logging<R, E>(
     handler: fn() -> Response requires {R} raises {E}
 ) -> Response
@@ -217,7 +217,7 @@ The `R` parameter is a row variable; the middleware accepts any handler row and 
 
 ### 5.2 Authentication
 
-```
+```di
 fn with_auth<R, E>(
     req: Request,
     handler: fn() -> Response requires {R + RequestCtx} raises {E}
@@ -246,7 +246,7 @@ The handler's row gains `RequestCtx` because `with_auth` re-binds it; the bindin
 
 ## 6. Controllers (HTTP handlers)
 
-```
+```di
 fn create_task_handler(req: Request) -> Response
     requires {TaskRepo, UserRepo, Logger, Clock, IdGen, RequestCtx}
     raises   {}
@@ -281,7 +281,7 @@ The controller signature is the longest in the system — that is by design. Pul
 
 ## 7. Router
 
-```
+```di
 fn router() -> Router<{TaskRepo, UserRepo, TokenSigner, Logger, Clock,
                         IdGen, RequestCtx}>
 {
@@ -298,7 +298,7 @@ fn router() -> Router<{TaskRepo, UserRepo, TokenSigner, Logger, Clock,
 
 ## 8. Wiring at main
 
-```
+```di
 fn main() {
     let rt = FiberRuntime(workers: 8)
 
@@ -324,7 +324,7 @@ fn main() {
 
 ## 9. Server with graceful shutdown
 
-```
+```di
 pub fn serve<R>(port: U16, router: Router<R>)
     requires {R, IO, Logger}
     raises   {IoError}
@@ -381,7 +381,7 @@ The accept loop is plain `loop { ... }`. No async/await colors any function. The
 
 A transaction is a `Transaction`-scoped capability whose `Lifecycle` issues `BEGIN`/`COMMIT`/`ROLLBACK`.
 
-```
+```di
 capability DbTx @ Transaction {
     fn execute(sql: Sql) raises {DbError}
     fn query(sql: Sql) -> Rows raises {DbError}
@@ -413,7 +413,7 @@ impl Lifecycle for PgTransaction {
 
 Used like this:
 
-```
+```di
 pub fn transfer_tasks(from: Uuid, to: Uuid)
     requires {WriteDb, Logger}
     raises   {DbFailure}
@@ -439,7 +439,7 @@ No `BEGIN` / `COMMIT` / `ROLLBACK` keywords. No transaction macro. The shape is 
 
 Test setup defines reusable `Wiring` values and splats them with `using`.
 
-```
+```di
 fn test_runtime() -> Wiring {
     provide {
         IO     = TestIO()                                          @ Process
