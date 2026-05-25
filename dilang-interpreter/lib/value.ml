@@ -24,7 +24,10 @@ and impl_method_dispatch =
   | DUser of Ast.impl_method                      (* Stage 4 *)
 
 and env = {
-  values : (Ast.ident * value ref) list;
+  (* Stage 7: third element is the per-binding `mut` flag (set by `let mut`).
+     Reads ignore it; `Assign` consults `Env.find_ref` to refuse writes to
+     immutable bindings. *)
+  values : (Ast.ident * value ref * bool) list;
 }
 
 and sink =

@@ -339,6 +339,107 @@ let stress_defer_return_in_if () =
   Alcotest.(check string) "defer + return in if"
     "defer fired\nzero\nafter if\ndefer fired\nnonzero\n" out
 
+(* --- Stage 7 stress: assignment + loops ---------------------------------- *)
+
+let stress_while_10k () =
+  (* 10,000-iteration `while` counter. Verifies that long-running loops
+     don't blow the OCaml stack — `while` is implemented as an OCaml `while`
+     loop in eval, so this is really a per-iteration allocation check. *)
+  let n = 10_000 in
+  let src = Printf.sprintf
+    "fn main() {\n\
+    \    let mut i = 0\n\
+    \    while i < %d { i = i + 1 }\n\
+    \    print(i)\n\
+    }\n" n
+  in
+  let out = run_string src in
+  Alcotest.(check string) "10k iter" (string_of_int n ^ "\n") out
+
+let stress_50_nested_loops_in_fns () =
+  (* 50 fns each running a `loop { ... break }` that prints once. Verifies
+     that activation frames + loop frames compose. *)
+  let n = 50 in
+  let b = Buffer.create 4096 in
+  for i = 1 to n do
+    Buffer.add_string b
+      (Printf.sprintf
+        "fn f%d() {\n\
+        \    let mut k = 0\n\
+        \    loop {\n\
+        \        if k >= 1 { break }\n\
+        \        print(\"f%d\")\n\
+        \        k = k + 1\n\
+        \    }\n\
+        }\n" i i)
+  done;
+  Buffer.add_string b "fn main() {\n";
+  for i = 1 to n do
+    Buffer.add_string b (Printf.sprintf "    f%d()\n" i)
+  done;
+  Buffer.add_string b "}\n";
+  let out = run_string (Buffer.contents b) in
+  let lines = String.split_on_char '\n' out in
+  Alcotest.(check int) "line count" (n + 1) (List.length lines);
+  Alcotest.(check string) "first" "f1" (List.nth lines 0);
+  Alcotest.(check string) "last"  (Printf.sprintf "f%d" n) (List.nth lines (n - 1))
+
+let stress_loop_defers_100 () =
+  (* 100-iteration loop registering one defer per iteration. Each iteration's
+     defer fires at the iteration's scope exit, interleaved with body prints.
+     The defer body reads the live `i` (DEC-012 capture-at-fire-time), so the
+     k-th defer prints the value `i` had AFTER the increment. *)
+  let n = 100 in
+  let src = Printf.sprintf
+    "fn main() {\n\
+    \    let mut i = 0\n\
+    \    let mut k = 0\n\
+    \    loop {\n\
+    \        if k >= %d { break }\n\
+    \        defer print(\"end ${i}\")\n\
+    \        print(\"body ${k}\")\n\
+    \        i = i + 1\n\
+    \        k = k + 1\n\
+    \    }\n\
+    \    print(\"done\")\n\
+    }\n" n
+  in
+  let out = run_string src in
+  let lines = String.split_on_char '\n' out in
+  (* 100 body lines + 100 end lines + "done" + trailing empty = 202 *)
+  Alcotest.(check int) "line count" (2 * n + 2) (List.length lines);
+  Alcotest.(check string) "first body" "body 0" (List.nth lines 0);
+  Alcotest.(check string) "first end"  "end 1"  (List.nth lines 1);
+  Alcotest.(check string) "last body"
+    (Printf.sprintf "body %d" (n - 1)) (List.nth lines (2 * n - 2));
+  Alcotest.(check string) "last end"
+    (Printf.sprintf "end %d" n) (List.nth lines (2 * n - 1));
+  Alcotest.(check string) "done" "done" (List.nth lines (2 * n))
+
+let stress_loop_string_accumulator () =
+  (* `loop`-as-expression returning a string built across 20 iterations via
+     a mutable accumulator then `break acc`. *)
+  let n = 20 in
+  let src = Printf.sprintf
+    "fn main() {\n\
+    \    let mut i = 0\n\
+    \    let mut acc = \"\"\n\
+    \    let r = loop {\n\
+    \        if i >= %d { break acc }\n\
+    \        acc = \"${acc}[${i}]\"\n\
+    \        i = i + 1\n\
+    \    }\n\
+    \    print(r)\n\
+    }\n" n
+  in
+  let out = run_string src in
+  let expected = Buffer.create 128 in
+  for i = 0 to n - 1 do
+    Buffer.add_string expected (Printf.sprintf "[%d]" i)
+  done;
+  Buffer.add_char expected '\n';
+  Alcotest.(check string) "loop accumulator" (Buffer.contents expected) out
+
 let stress_interpolation () =
   let n = 200 in
   let b = Buffer.create (40 * n) in
@@ -549,6 +650,49 @@ let err_defer_body_raises_is_swallowed () =
   Alcotest.(check string) "defer raise is swallowed"
     "body\nd1\nafter\n" out
 
+(* --- Stage 7 negatives -------------------------------------------------- *)
+
+let neg_assign_immutable () =
+  check_raises_substr "assign to immutable" "cannot assign to immutable `x`"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let x = 1\n\
+         \    x = 2\n\
+         }\n")
+
+let neg_assign_unbound () =
+  check_raises_substr "assign unbound" "unknown name `nope`"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    nope = 1\n\
+         }\n")
+
+let neg_break_outside_loop () =
+  check_raises_substr "break outside loop" "break outside any loop"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    break\n\
+         }\n")
+
+let neg_continue_outside_loop () =
+  check_raises_substr "continue outside loop" "continue outside any loop"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    continue\n\
+         }\n")
+
+let neg_while_cond_not_bool () =
+  check_raises_substr "while cond not Bool" "while condition not Bool"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    while 1 { print(\"x\") }\n\
+         }\n")
+
 let neg_field_on_non_impl () =
   check_raises_substr "field on non-impl" "field access on non-impl value"
     (fun () ->
@@ -602,6 +746,19 @@ let () =
       ; Alcotest.test_case "06e_nested_fns"      `Quick (stage_test ~name:"06e_nested_fns")
       ; Alcotest.test_case "06f_block_scoped"    `Quick (stage_test ~name:"06f_block_scoped")
       ]
+    ; "stage7",
+      [ Alcotest.test_case "07_assign_loops"          `Quick (stage_test ~name:"07_assign_loops")
+      ; Alcotest.test_case "07b_while"                `Quick (stage_test ~name:"07b_while")
+      ; Alcotest.test_case "07c_continue"             `Quick (stage_test ~name:"07c_continue")
+      ; Alcotest.test_case "07d_defer_per_iteration"  `Quick (stage_test ~name:"07d_defer_per_iteration")
+      ; Alcotest.test_case "07e_break_fires_defers"   `Quick (stage_test ~name:"07e_break_fires_defers")
+      ; Alcotest.test_case "07f_break_in_try_runs_try_defers"
+          `Quick (stage_test ~name:"07f_break_in_try_runs_try_defers")
+      ; Alcotest.test_case "07g_return_through_loop"  `Quick (stage_test ~name:"07g_return_through_loop")
+      ; Alcotest.test_case "07h_loop_as_expression"   `Quick (stage_test ~name:"07h_loop_as_expression")
+      ; Alcotest.test_case "07i_mutate_field"         `Quick (stage_test ~name:"07i_mutate_field")
+      ; Alcotest.test_case "07j_mutate_self_field"    `Quick (stage_test ~name:"07j_mutate_self_field")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -619,6 +776,10 @@ let () =
       ; Alcotest.test_case "defers_100"             `Quick stress_defers_100
       ; Alcotest.test_case "deep_defer_raise_50"    `Quick stress_deep_defer_raise
       ; Alcotest.test_case "defer_return_in_if"     `Quick stress_defer_return_in_if
+      ; Alcotest.test_case "while_10k"              `Quick stress_while_10k
+      ; Alcotest.test_case "nested_loops_in_fns_50" `Quick stress_50_nested_loops_in_fns
+      ; Alcotest.test_case "loop_defers_100"        `Quick stress_loop_defers_100
+      ; Alcotest.test_case "loop_string_accumulator" `Quick stress_loop_string_accumulator
       ]
     ; "errors",
       [ Alcotest.test_case "cap_not_in_scope"    `Quick neg_cap_not_in_scope
@@ -641,5 +802,10 @@ let () =
       ; Alcotest.test_case "some_arity"            `Quick neg_some_arity
       ; Alcotest.test_case "defer_body_raises_swallowed"
           `Quick err_defer_body_raises_is_swallowed
+      ; Alcotest.test_case "assign_immutable"      `Quick neg_assign_immutable
+      ; Alcotest.test_case "assign_unbound"        `Quick neg_assign_unbound
+      ; Alcotest.test_case "break_outside_loop"    `Quick neg_break_outside_loop
+      ; Alcotest.test_case "continue_outside_loop" `Quick neg_continue_outside_loop
+      ; Alcotest.test_case "while_cond_not_bool"   `Quick neg_while_cond_not_bool
       ]
     ]

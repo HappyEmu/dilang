@@ -34,6 +34,10 @@ let keyword_or_ident s =
   | "try"        -> TRY
   | "catch"      -> CATCH
   | "defer"      -> DEFER
+  | "loop"       -> LOOP
+  | "while"      -> WHILE
+  | "break"      -> BREAK
+  | "continue"   -> CONTINUE
   | "true"       -> BOOL true
   | "false"      -> BOOL false
   | _            -> IDENT s

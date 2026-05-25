@@ -11,6 +11,7 @@ open Ast
 %token CAPABILITY PROVIDE REQUIRES RAISES IN
 %token STRUCT IMPL FOR EXTENDS
 %token IF ELSE ENUM RAISE TRY CATCH DEFER
+%token LOOP WHILE BREAK CONTINUE
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
 %token LPAREN RPAREN LBRACE RBRACE
@@ -135,7 +136,38 @@ block:
 
 block_item:
   | LET; m = mut_opt; n = IDENT; EQ; e = expr       { BLet { name = n; mut = m; rhs = e } }
-  | e = expr                                        { BExpr e }
+  | WHILE; c = expr; b = block                      { BExpr (While { cond = c; body = b }) }
+  | BREAK; p = break_payload_opt                    { BExpr (Break p) }
+  | CONTINUE                                        { BExpr Continue }
+  (* Assignment piggybacks on `expr` so we don't have to redeclare every
+     IDENT-prefixed atom production. The semantic action pattern-matches the
+     LHS: bare `Var` → `Assign`, `FieldGet` → `AssignField`; anything else is
+     a parse-time error. EQ cannot occur inside `expr`, so the optional tail
+     does not add new conflicts. *)
+  | lhs = expr; t = assign_tail
+      { match t with
+        | None     -> BExpr lhs
+        | Some rhs ->
+            (match lhs with
+             | Var n -> BExpr (Assign { name = n; rhs })
+             | FieldGet { recv; name } ->
+                 BExpr (AssignField { recv; name; rhs })
+             | _ ->
+                 failwith
+                   "left-hand side of `=` must be `name` or `expr.field`") }
+
+assign_tail:
+  |               { None }
+  | EQ; e = expr  { Some e }
+
+(* DEC-013: `break;` carries no value (yields VUnit); `break v` carries one.
+   Same trick Stage 5 used for `raise` — parse `BREAK atom?` explicitly via a
+   dedicated option rule so we don't reintroduce the optional-prefix
+   conflict path. Conflict watch: `BREAK . <atom-token>` shifts greedily,
+   which matches DEC-013 semantics. *)
+break_payload_opt:
+  |              { None }
+  | a = atom     { Some a }
 
 mut_opt:
   |     { false }
@@ -182,6 +214,9 @@ atom:
   | LPAREN; e = expr; RPAREN                             { e }
   | b = block                                            { b }
   | IF; c = expr; t = block; e = else_opt                { If { cond = c; then_ = t; else_ = e } }
+  (* DEC-013: `loop` is an expression yielding `break v`'s payload (VUnit if
+     `break;` carries nothing). `while` lives at block_item only. *)
+  | LOOP; b = block                                       { Loop b }
   | TRY; b = expr; CATCH; LBRACE; arms = catch_arms; RBRACE
       { Try { body = b; arms } }
   (* §7.3 (provide @ Scope { ... }) / §7.4 (Wiring values, no `in`) — Stage 7 / Stage 9 *)

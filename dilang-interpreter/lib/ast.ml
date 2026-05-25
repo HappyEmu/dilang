@@ -36,6 +36,12 @@ type expr =
      on exit (DEC-012). `Block` is the internal sequencing node produced by
      `block_of_items` and does *not* push a frame. *)
   | Scope        of expr
+  | Assign       of { name : ident; rhs : expr }
+  | AssignField  of { recv : expr; name : ident; rhs : expr }
+  | Loop         of expr
+  | While        of { cond : expr; body : expr }
+  | Break        of expr option
+  | Continue
 
 and string_part =
   | SLit of string

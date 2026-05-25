@@ -3,6 +3,10 @@ open Value
 
 exception Return_exn of value
 exception Dilang_error of { tag : string; payload : value list }
+(* Stage 7 (DEC-013). Caught by `Loop` / `While`; the activation boundary
+   (`call_fn`, `DUser`) converts an escaped instance into a runtime error. *)
+exception Break_exn of value
+exception Continue_exn
 
 let type_err msg = failwith ("type error: " ^ msg)
 
@@ -36,7 +40,7 @@ let rec eval_binop op a b =
 let rec match_pattern env pat v =
   match pat, v with
   | PWild, _ -> Some env
-  | PVar name, _ -> Some (Env.extend env name v)
+  | PVar name, _ -> Some (Env.extend env name v ~mut:false)
   | PVariant { tag; sub }, VEnum { tag = vtag; payload; _ }
       when String.equal tag vtag && List.length sub = List.length payload ->
       let rec fold env subs payloads =
@@ -75,9 +79,9 @@ let rec eval (ctx : ctx) = function
                 (match Hashtbl.find_opt ctx.host_constructors x with
                  | Some ctor -> VImpl (ctor [])
                  | None      -> failwith ("unbound name: " ^ x)))))
-  | Let { name; mut = _; rhs; body } ->
+  | Let { name; mut; rhs; body } ->
       let v = eval ctx rhs in
-      let env' = Env.extend ctx.env name v in
+      let env' = Env.extend ctx.env name v ~mut in
       eval { ctx with env = env' } body
   | Block es ->
       List.fold_left (fun _ e -> eval ctx e) VUnit es
@@ -243,20 +247,25 @@ let rec eval (ctx : ctx) = function
              failwith ("arity mismatch calling " ^ cap ^ "." ^ method_);
            let env0 =
              List.fold_left2
-               (fun env (pname, _ty) v -> Env.extend env pname v)
+               (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
                Env.empty m.im_params arg_vs
            in
            let env_with_self =
              if impl.fields = [] then env0
-             else Env.extend env0 "self" (VImpl impl)
+             else Env.extend env0 "self" (VImpl impl) ~mut:false
            in
            let activation_ctx =
              { ctx with env = env_with_self; caps = impl.cap_env }
            in
            (* Same as `call_fn`: defers belong to the method body's `Scope`
-              (DEC-012); this arm only owns the `Return_exn` catch. *)
+              (DEC-012); this arm only owns the `Return_exn` catch. Stage 7
+              adds catches for `Break_exn` / `Continue_exn` that leaked past
+              the innermost loop — convert to a runtime error. *)
            try eval activation_ctx m.im_body
-           with Return_exn v -> v)
+           with
+           | Return_exn v -> v
+           | Break_exn _  -> failwith "break outside any loop"
+           | Continue_exn -> failwith "continue outside any loop")
   | StructLit { ty; fields } ->
       let evaluated = List.map (fun (n, e) -> (n, eval ctx e)) fields in
       let ctor =
@@ -275,17 +284,71 @@ let rec eval (ctx : ctx) = function
             | Some r -> !r
             | None   -> failwith ("no field " ^ name ^ " on " ^ iv.ty))
        | _ -> type_err ("field access on non-impl value: " ^ name))
+  | Assign { name; rhs } ->
+      (match Env.find_ref ctx.env name with
+       | Some (r, true)  -> r := eval ctx rhs; VUnit
+       | Some (_, false) -> failwith ("cannot assign to immutable `" ^ name ^ "`")
+       | None            -> failwith ("unknown name `" ^ name ^ "`"))
+  | AssignField { recv; name; rhs } ->
+      (* DEC-014 (Deferred): the eventual rule requires the receiver's root
+         binding to be `mut` for field mutation to be legal. v0 does not
+         enforce this — we walk straight through the field-as-ref produced
+         by the struct constructor (Stage 4), so `let t = Tally{count:0};
+         t.count = 1` runs successfully. Programs that rely on this will
+         need a `let mut` added when the stricter rule lands. *)
+      (match eval ctx recv with
+       | VImpl iv ->
+           (match List.assoc_opt name iv.fields with
+            | Some r -> r := eval ctx rhs; VUnit
+            | None   -> failwith ("no field " ^ name ^ " on " ^ iv.ty))
+       | _ -> type_err ("field assignment on non-impl value: " ^ name))
+  | Loop body ->
+      (* DEC-013: `loop` is an expression. The only exit is `Break_exn`;
+         the body's `Scope` propagates it past the body's defers, and we
+         hand back the carried value. `Continue_exn` aborts the current
+         iteration only — caught inside the `while true` per iteration. *)
+      (try
+         while true do
+           try ignore (eval ctx body) with Continue_exn -> ()
+         done;
+         assert false
+       with Break_exn v -> v)
+  | While { cond; body } ->
+      (try
+         while
+           (match eval ctx cond with
+            | VBool b -> b
+            | _ -> type_err "while condition not Bool")
+         do
+           try ignore (eval ctx body) with Continue_exn -> ()
+         done
+       with Break_exn _ -> ());
+      VUnit
+  | Break payload_opt ->
+      let v =
+        match payload_opt with
+        | Some e -> eval ctx e
+        | None   -> VUnit
+      in
+      raise (Break_exn v)
+  | Continue ->
+      raise Continue_exn
 
 and call_fn (ctx : ctx) (f : fn_decl) args =
   if List.length f.params <> List.length args then
     failwith ("arity mismatch calling " ^ f.name);
   let env0 =
     List.fold_left2
-      (fun env (pname, _ty) v -> Env.extend env pname v)
+      (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
       Env.empty f.params args
   in
   (* Defers belong to the fn body's `Scope`, not to this activation
      (DEC-012). `call_fn` only owns the `Return_exn` catch. The `Scope` that
-     wraps `f.body` runs its defers before `Return_exn` propagates here. *)
+     wraps `f.body` runs its defers before `Return_exn` propagates here.
+     Stage 7: also catch `Break_exn` / `Continue_exn` that leaked past every
+     enclosing loop and surface them as runtime errors (after defers ran). *)
   try eval { ctx with env = env0 } f.body
-  with Return_exn v -> v
+  with
+  | Return_exn v -> v
+  | Break_exn _  -> failwith "break outside any loop"
+  | Continue_exn -> failwith "continue outside any loop"

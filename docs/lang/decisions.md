@@ -110,3 +110,14 @@ Matches Rust. The asymmetry is the right call: `loop` is the construct you reach
 - Rejected: `break v` allowed in `while`/`for` — only useful when the body runs at least once, and the type checker can't prove that without flow analysis we don't want to require.
 
 Interpreter (Stage 7): `Break_exn` carries an optional value (`Break_exn of value`; bare `break` → `Break_exn VUnit`). The `Loop` arm catches and returns the carried value; `While` / `For` arms catch and discard, returning `VUnit`.
+
+## DEC-014 — Field mutation requires `mut` on the binding (Deferred)
+Status: Deferred (v0 interpreter behavior noted) · Cites: design §2.1, §2.10, syntax §1
+The eventual rule: `recv.field = rhs` is legal only when `recv` was bound `let mut` (or the field is reached through a chain whose root binding is `mut`). Matches Rust: `let s = Foo{...}; s.field = …` is a compile error; `let mut s = Foo{...}; s.field = …` is fine. Same review-time visibility argument as DEC-002.10's "mutation is visible at the binding site": if `s` is `let` (no `mut`), nothing that follows can mutate the value reachable through it.
+
+Interpreter v0 (Stage 7): **not enforced.** `AssignField` walks straight through the field-as-ref the struct constructor produced (Stage 4) without consulting the binding's `mut` flag, so `let t = Tally{count: 0}; t.count = 1` runs successfully. Documented at the `AssignField` arm in `eval.ml` and at the call sites in `test/stages/07i_mutate_field.di` / `07j_mutate_self_field.di`.
+
+Likely landing: enforce at the parser/typechecker boundary once we have a flow-sensitive way to trace the root binding of an `AssignField`'s receiver chain. Until then, the interpreter accepts more programs than the language definition will eventually allow — programs that rely on this leniency will need a `mut` added to compile under the stricter rule.
+
+- Rejected for v0: enforce in the interpreter now — needs receiver-root tracing through arbitrary expr chains (`a.b.c.d = …`), which is doable but easier with the typechecker's plumbing in place.
+- Rejected: drop the rule (allow field mutation on any binding) — contradicts §2.10's "optimize for review: mutation is visible at the binding site." A reader who sees `let s = …` should be entitled to assume nothing downstream mutates state reachable through `s`.
