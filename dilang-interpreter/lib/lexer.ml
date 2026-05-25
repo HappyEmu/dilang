@@ -33,6 +33,7 @@ let keyword_or_ident s =
   | "raise"      -> RAISE
   | "try"        -> TRY
   | "catch"      -> CATCH
+  | "defer"      -> DEFER
   | "true"       -> BOOL true
   | "false"      -> BOOL false
   | _            -> IDENT s

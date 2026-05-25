@@ -10,7 +10,7 @@ open Ast
 %token FN LET MUT RETURN
 %token CAPABILITY PROVIDE REQUIRES RAISES IN
 %token STRUCT IMPL FOR EXTENDS
-%token IF ELSE ENUM RAISE TRY CATCH
+%token IF ELSE ENUM RAISE TRY CATCH DEFER
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
 %token LPAREN RPAREN LBRACE RBRACE
@@ -19,6 +19,7 @@ open Ast
 %token EOF
 
 %nonassoc RETURN
+%nonassoc DEFER
 %right QMARK_QMARK
 %left EQEQ BANGEQ LT GT LEQ GEQ
 %left PLUS MINUS
@@ -127,7 +128,10 @@ param:
   | n = IDENT; COLON; t = type_name                 { (n, t) }
 
 block:
-  | LBRACE; items = list(block_item); RBRACE        { block_of_items items }
+  (* Every surface `{ ... }` becomes a `Scope`, which is the defer-frame
+     boundary (DEC-012). The inner `block_of_items` lowers to `Let` / `Block`
+     for sequencing only — those do not push frames. *)
+  | LBRACE; items = list(block_item); RBRACE        { Scope (block_of_items items) }
 
 block_item:
   | LET; m = mut_opt; n = IDENT; EQ; e = expr       { BLet { name = n; mut = m; rhs = e } }
@@ -139,6 +143,7 @@ mut_opt:
 
 expr:
   | RETURN; e = expr             { Return e }
+  | DEFER;  e = expr             { Defer e }
   (* `raise X` and `raise X(args)` reuse the atom IDENT/Call shape (state 21
      conflict, resolved by shift) instead of introducing an extra optional
      production. Keeps the conflict count from rising past Stage 4's 3. *)

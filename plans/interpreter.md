@@ -56,16 +56,51 @@ The stage list:
 | 4 | User impls and composition           | `struct`, `impl X for T`, impl-private `requires`, `extends`, multi-binding `provide` |
 | 5 | Errors and Option                    | `enum`, `raise`, `try ... catch`, `Never`, `T?`, `??`, `?.`          |
 | 6 | Defer                                | `defer`                                                              |
-| 7 | Scopes                               | `scope X`, `@ X` on caps and bindings, `provide @ X`                 |
-| 8 | Lifecycle                            | `Lifecycle` impls, `start`/`shutdown`, `ExitReason`, topo order      |
-| 9 | Wiring values                        | `provide { ... }` w/o body → `Wiring`, `using w1, w2`, lexical override |
-| 10 | Closures and row-polymorphic middleware | `\|...\| ...`, function types, `<R, E>` row variables               |
-| 11 | Concurrency via IO                  | `IO.spawn`, `Future`, `Group`, `Mutex`                               |
-| 12 | Cancellation                         | `with_cancel`, `Cancelled`, `uncancellable`, `with_timeout`, `select` |
-| 13 | Streams and iteration                | `stream { yield }`, `for x in iter`, `loop`, `break`, `continue`     |
-| 14 | Tests as a top-level form            | `test "..." { ... }`, `assert`, mock backend                         |
+| 7 | Assignment and loops                 | `x = rhs`, `loop`, `while`, `break`, `continue`                      |
+| 8 | Arrays and iteration                 | `[a, b, c]`, `xs[i]`, `.len`/`.push`, `for x in xs`                  |
+| 9 | Strings                              | `.len`, `.split`, `.contains`, `.starts_with`, `.ends_with`, `.trim` |
+| 10 | Closures                            | `\|x\| body`, function-type values, capability capture              |
+| 11 | HTTP server and client               | `HttpServer`, `HttpClient`, `Request`, `Response`, `HttpError`      |
+| — | **Milestone 11.5** — HTTP service with router | no new features; first ship-worthy program                |
+| 12 | Scopes                              | `scope X`, `@ X` on caps and bindings, `provide @ X`                 |
+| 13 | Lifecycle                           | `Lifecycle` impls, `start`/`shutdown`, `ExitReason`, topo order      |
+| 14 | Wiring values                       | `provide { ... }` w/o body → `Wiring`, `using w1, w2`, lexical override |
+| — | **Milestone 14.5** — service with `@ Request`, DB pool, dev/test/prod wirings | no new features        |
+| 15 | Concurrency via IO                  | `IO.spawn`, `Future`, `Group`, `Mutex`; concurrent HTTP impl         |
+| 16 | Cancellation                        | `with_cancel`, `Cancelled`, `uncancellable`, `with_timeout`, `select` |
+| 17 | Streams                             | `stream { yield }`, `for x in stream`                                |
+| 18 | Stdin and filesystem capabilities   | `StdinReader`, `FsRead`, `FsWrite`                                   |
+| 19 | Tests as a top-level form           | `test "..." { ... }`, `assert`, mock backend                         |
 
 Plus a final non-stage: **future phase**, the static type checker, which consumes the AST and enforces what the interpreter currently trusts.
+
+### Reshuffle rationale (post-Stage-6)
+
+The original ordering finished the dilang-specific machinery (scopes, Lifecycle, Wiring, closures, concurrency, cancellation) before the boring features that let you write real programs (loops, arrays, strings, network I/O). After Stage 5 landed, that left an awkward gap: the language could express scoped transactions on paper but couldn't run `wc`.
+
+The reshuffle frontloads **assignment + loops (7)**, **arrays (8)**, and **strings (9)** so closures (10) and the first network capability (11) arrive on top of a usable substrate. Stage 11 is the inflection point — once `HttpServer` runs, every subsequent stage motivates itself by improving the same demo service: routed → scoped → pooled → concurrent → cancellable → streamed → tested.
+
+Two milestones (11.5 and 14.5) ship complete programs with no new language features, to validate the design against running code before the next round of machinery lands.
+
+### Demo backbone
+
+Stages 11 through 19 all sharpen the same artefact: a backend HTTP service. The progression:
+
+| After stage | What the service does |
+|-------------|-----------------------|
+| 11 | Responds to `curl`; single connection at a time; stateless handler |
+| 11.5 (milestone) | Route table, query parsing, JSON-shaped responses |
+| 12 (scopes) | `@ Request` bindings around each handler (`RequestId`, scoped logger) |
+| 13 (Lifecycle) | DB connection pool with `start`/`shutdown` |
+| 14 (Wiring) | `dev_runtime()` / `prod_runtime()` / `test_runtime()` selected at `main` |
+| 14.5 (milestone) | Complete service with all of the above, manually exercised |
+| 15 (concurrency) | Concurrent request handling (drop in `EioHttpServer`) |
+| 16 (cancellation) | Per-request timeouts, graceful shutdown |
+| 17 (streams) | Chunked responses, server-sent events |
+| 18 (stdin/fs) | Config files, log file output |
+| 19 (tests) | `test "..." { provide ... } in { ... }`, mock HTTP client |
+
+Each stage's example program is a small delta on the previous one, not a fresh toy.
 
 -----
 
@@ -307,7 +342,7 @@ Constructor registration: a single host-constructor table mapping `"StdoutLogger
 
 ### Deferred
 
-User-defined impls (Stage 4), capability `extends` (Stage 4), impl-private `requires` (Stage 4), Wiring values (Stage 9), scopes other than `Process` (Stage 7), Lifecycle (Stage 8).
+User-defined impls (Stage 4), capability `extends` (Stage 4), impl-private `requires` (Stage 4), Wiring values (Stage 14), scopes other than `Process` (Stage 12), Lifecycle (Stage 13).
 
 -----
 
@@ -562,14 +597,17 @@ fn handle(name: Str) {
     print("doing ${name}")
 }
 
+fn risky() raises {AppError} {
+    defer print("risky cleanup")
+    raise BadInput("oops")
+}
+
 fn main() {
     handle("a")
     handle("b")
-
-    try {
-        defer print("inner cleanup")
-        raise BadInput("oops")
-    } catch BadInput(_) -> print("caught")
+    try risky() catch {
+        BadInput(_) -> print("caught")
+    }
 }
 ```
 
@@ -579,66 +617,552 @@ doing a
 cleanup a
 doing b
 cleanup b
-inner cleanup
+risky cleanup
 caught
 ```
 
-Note the third block: the defer fires before control reaches the `catch`, because defer is per-function-exit and the `try` doesn't break that activation.
+`defer` is **block-scoped** — see DEC-012 (matches Zig/Swift/D; diverges from Go). A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block: fall-through, `return`, `break`/`continue` (Stage 7+), raised error, cancellation. Each `{ ... }` in surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `provide ... in` body, bare block expression. Defers within a block fire LIFO. The body expression is evaluated when the defer *fires*, not at registration; reads of mutable state see scope-exit values.
 
-Actually re-reading syntax §14: "defer blocks run on every exit path … LIFO. A defer block runs to completion before exit continues." Defer is **function-scoped** (the enclosing function), not block-scoped. So the third defer is registered in `main`, runs only when `main` exits, not at the `try` boundary. Let me redo the example:
+In the example: `handle`'s defer is in the fn body block, fires as that block exits. `risky`'s defer fires as the fn-body block unwinds via raised error, before the raise reaches `main`'s `try`. A defer inside `try { defer X; raise ... }` would fire as that try-body block exited, *before* `catch` ran.
+
+### What's new
+
+`defer expr` registers a finalizer for the enclosing block's exit (any path). Two prior-art models the language explicitly does not adopt:
+- Go (function-scoped + args captured at registration) — makes `for { defer release(x) }` a leak, and forces refactoring to recover.
+- Function-scoped with body-evaluated-at-fire-time (the v0 sketch this section originally proposed) — same loop footgun, plus reviewer has to scan upward to find the activation boundary.
+
+### Interpreter changes
+
+AST: `Defer of expr` and `Scope of expr`. The parser's `block:` rule wraps the result of `block_of_items` in `Scope`, so every `{ ... }` produces a `Scope`.
+
+Eval: `Defer` pushes a closure onto `ctx.defers`. `Scope` swaps in a fresh `defers : (unit -> unit) list ref`, evaluates the body inside `Fun.protect`, and runs the frame's defers in `finally` (LIFO, per-thunk exceptions swallowed per DEC-011 v0):
+
+```ocaml
+| Scope body ->
+    let frame = ref [] in
+    let ctx' = { ctx with defers = frame } in
+    Fun.protect
+      ~finally:(fun () -> run_defers !frame)
+      (fun () -> eval ctx' body)
+
+| Defer body ->
+    let ctx_at_reg = ctx in
+    ctx.defers := (fun () -> ignore (eval ctx_at_reg body)) :: !(ctx.defers);
+    VUnit
+```
+
+Activation boundaries (`call_fn`, `DUser` arm of `CapCall`) own *only* the `Return_exn` catch — defer state belongs to the fn-body's `Scope`, not to the activation. Return raises `Return_exn`; each `Scope`'s `Fun.protect` runs its defers on the way up; `call_fn` catches `Return_exn` at the top and returns the value.
+
+`Cancelled` (Stage 16) and `Panic` slot into the same machinery: any exception propagating through a `Scope` triggers its `Fun.protect` finally.
+
+### Deferred
+
+`Drop` for ordinary values (separate per-value finalizer hook). `errdefer` / `successdefer` for exit-path-conditional cleanup (DEC-011). Stricter policy on defer-body-raises (DEC-011; currently swallowed in v0).
+
+-----
+
+## Stage 7 — Assignment and loops
+
+### Example
 
 ```di
-fn risky() raises {AppError} {
-    defer print("risky cleanup")
-    raise BadInput("oops")
-}
-
 fn main() {
-    handle("a")
-    try risky() catch BadInput(_) -> print("caught")
+    let mut i   = 0
+    let mut sum = 0
+    loop {
+        if i >= 10 { break }
+        sum = sum + i
+        i = i + 1
+    }
+    print(sum)                            // 45
+
+    let mut n = 5
+    while n > 0 {
+        print(n)
+        n = n - 1
+    }
+    print("done")
 }
 ```
 
 Expected:
 ```
-doing a
-cleanup a
-risky cleanup
-caught
+45
+5
+4
+3
+2
+1
+done
 ```
-
-The `defer` in `risky` runs as `risky` exits via the raise, *before* `main` catches it.
 
 ### What's new
 
-`defer expr` registers a finalizer for the enclosing function's exit (normal, raised, cancelled, panicked).
+Mutable rebinding `x = rhs`, legal only where `x` was bound `let mut`. Infinite `loop { ... }`. `while cond { ... }`. `break` and `continue` exit / restart the innermost `loop`/`while`. Loops are statements at v0; they evaluate to `VUnit`.
+
+Stage 1 introduced `let mut` parsing but assignment had no AST node. This stage finishes the surface-level mutability story.
 
 ### Interpreter changes
 
-AST: `Defer of expr`.
-
-Eval: `Defer` pushes a closure onto `ctx.defers : (unit -> unit) list ref`. The function-call activation (in `call_fn` and `dispatch_user`) wraps the body in `Fun.protect`:
+AST:
 
 ```ocaml
-let call_fn ctx f args =
-  let defers = ref [] in
-  let activation = { ctx with env = ...; defers } in
-  Fun.protect
-    ~finally:(fun () ->
-      List.iter (fun fn -> try fn () with _ -> ()) !defers)
-    (fun () ->
-      try eval activation f.body with Return_exn v -> v)
+type expr =
+  | ...
+  | Assign   of { name : ident; rhs : expr }
+  | Loop     of expr                       (* body *)
+  | While    of { cond : expr; body : expr }
+  | Break
+  | Continue
 ```
 
-Defer also runs on `Dilang_error`, `Cancelled` (Stage 12), `Panic`. `Fun.protect`'s `finally` runs on any exit, so this is automatic.
+Parser: new keywords `LOOP`, `WHILE`, `BREAK`, `CONTINUE`. The `IDENT = expr` form needs lookahead: at `block_item` start, `IDENT EQUALS` parses as `Assign`, otherwise fall through to `expr`. No new shift/reduce conflict if `EQUALS` doesn't appear inside `expr`.
+
+Eval:
+
+```ocaml
+exception Break_exn
+exception Continue_exn
+
+| Assign { name; rhs } ->
+    (match Env.find_ref ctx.env name with
+     | Some (r, true)  -> r := eval ctx rhs; VUnit
+     | Some (_, false) -> failwith ("cannot assign to immutable `" ^ name ^ "`")
+     | None            -> failwith ("unknown name `" ^ name ^ "`"))
+
+| Loop body ->
+    (try while true do ignore (eval ctx body) done
+     with Break_exn -> ()); VUnit
+
+| While { cond; body } ->
+    (try
+       while (match eval ctx cond with VBool b -> b | _ -> panic "while cond not bool") do
+         try ignore (eval ctx body) with Continue_exn -> ()
+       done
+     with Break_exn -> ()); VUnit
+
+| Break    -> raise Break_exn
+| Continue -> raise Continue_exn
+```
+
+Extend `env.values` to carry a `bool` mut flag per binding (or maintain a parallel `mut_names` set). `Let { mut = true }` records the flag at bind time; `Assign` checks before mutating the ref.
+
+Defer (Stage 6) interaction: `break`/`continue` do not cross an activation boundary, so they do not fire defers. `try`/`catch` catches `Dilang_error` only, not `Break_exn`/`Continue_exn`, so a `break` inside a `try` flows out to the enclosing loop as intended. Add a test for both.
 
 ### Deferred
 
-`Drop` for ordinary values (separate hook), defer block ordering across nested function calls (already handled by activations being nested), defer-during-defer (a defer that itself raises is swallowed in v0 — improvement in a later pass).
+Labeled break (`break 'outer`). `for x in iter` is Stage 8 (when arrays land). `do { ... } while`-style post-test is not in the language.
 
 -----
 
-## Stage 7 — Scopes
+## Stage 8 — Arrays and iteration
+
+### Example
+
+```di
+fn main() {
+    let nums = [3, 1, 4, 1, 5, 9, 2, 6]
+
+    let mut max = nums[0]
+    for n in nums {
+        if n > max { max = n }
+    }
+    print(max)                            // 9
+
+    let mut doubled = []
+    for n in nums {
+        doubled.push(n * 2)
+    }
+    print(doubled.len())                  // 8
+    print(doubled[3])                     // 2
+}
+```
+
+### What's new
+
+`[a, b, c]` array literal. `xs[i]` indexed read (panic on out-of-bounds in v0; later, a typed `[]?` form may return `Option`). `xs.len() -> I64`. `xs.push(v)` (mutating; `xs` must be `let mut`). `for x in xs { body }` iteration over arrays.
+
+Empty array literal `[]` infers element type from context. In the interpreter values are typeless; the type checker enforces uniformity later.
+
+This stage introduces **value-method dispatch** — `xs.len()` is not a capability call. Add a minimal table keyed by host type tag, distinct from `Cap.method(...)`. The parser produces a generic `MethodCall { target; name; args }`; eval branches on the runtime type of `target`.
+
+### Interpreter changes
+
+AST:
+
+```ocaml
+type expr =
+  | ...
+  | ArrayLit   of expr list
+  | Index      of { target : expr; idx : expr }
+  | For        of { var : ident; iter : expr; body : expr }
+  | MethodCall of { target : expr; name : ident; args : expr list }
+```
+
+Value:
+
+```ocaml
+type value =
+  | ...
+  | VArray of value array ref              (* growable via Array.append *)
+```
+
+(Use `Dynarray.t` if the OCaml version is recent enough; otherwise a plain `value array ref` with manual growth is fine — these arrays are short.)
+
+Eval:
+
+```ocaml
+| ArrayLit es ->
+    VArray (ref (Array.of_list (List.map (eval ctx) es)))
+
+| Index { target; idx } ->
+    (match eval ctx target, eval ctx idx with
+     | VArray a, VInt i ->
+         let i = Int64.to_int i in
+         if i < 0 || i >= Array.length !a then panic "index out of bounds";
+         (!a).(i)
+     | _ -> panic "indexing non-array")
+
+| For { var; iter; body } ->
+    (match eval ctx iter with
+     | VArray a ->
+         (try
+            Array.iter (fun v ->
+              let env' = Env.bind ctx.env var ~mut:false v in
+              try ignore (eval { ctx with env = env' } body)
+              with Continue_exn -> ()) !a
+          with Break_exn -> ());
+         VUnit
+     | _ -> panic "for over non-iterable")
+
+| MethodCall { target; name = "len"; args = [] } ->
+    (match eval ctx target with
+     | VArray a -> VInt (Int64.of_int (Array.length !a))
+     | VStr s   -> VInt (Int64.of_int (String.length s))     (* Stage 9 reuses this arm *)
+     | _ -> panic "len on unsupported type")
+
+| MethodCall { target; name = "push"; args = [v] } ->
+    (match eval ctx target with
+     | VArray a ->
+         a := Array.append !a [| eval ctx v |]; VUnit
+     | _ -> panic "push on non-array")
+```
+
+`for` over an array reuses `Break_exn`/`Continue_exn` from Stage 7. The eval loop is unconditionally iterative — no generator suspension here; that's Stage 17.
+
+### Deferred
+
+A general `Iterator<T>` trait dispatch. `for` over user-defined iterables. Slicing (`xs[a..b]`). `map`/`filter`/`fold` (need closures, Stage 10). `pop`, `get`, `insert`, `remove` can be added as demos demand — keep the bare set tight until then.
+
+-----
+
+## Stage 9 — Strings
+
+### Example
+
+```di
+fn main() {
+    let s = "GET /users/42 HTTP/1.1"
+
+    print(s.len())                              // 22
+    print(s.starts_with("GET"))                 // true
+    print(s.contains("/users/"))                // true
+
+    let parts = s.split(" ")
+    print(parts.len())                          // 3
+    print(parts[1])                             // /users/42
+
+    let trimmed = "  hello  ".trim()
+    print("[${trimmed}]")                       // [hello]
+}
+```
+
+### What's new
+
+`Str` gains value-method-dispatch (reusing Stage 8's `MethodCall` plumbing):
+
+- `.len() -> I64`
+- `.contains(needle: Str) -> Bool`
+- `.starts_with(prefix: Str) -> Bool`
+- `.ends_with(suffix: Str) -> Bool`
+- `.split(sep: Str) -> [Str]`
+- `.trim() -> Str`
+
+No string mutation in v0. No char-level operations — `.chars()` and indexing are deferred.
+
+### Interpreter changes
+
+AST: nothing new. Method dispatch is the Stage 8 mechanism.
+
+Eval: extend the value-method-dispatch table for `VStr`. Implementations are direct calls to `Stdlib.String` (`String.length`, `String.starts_with`, `String.ends_with`, `String.trim`). `.contains` and `.split` for multi-character separators need a small handwritten substring scanner (~15 lines) since `Stdlib.String.split_on_char` only accepts a single char.
+
+```ocaml
+| MethodCall { target; name = "split"; args = [sep] } ->
+    (match eval ctx target, eval ctx sep with
+     | VStr s, VStr sep ->
+         let pieces = String_util.split_on_substring s sep in
+         VArray (ref (Array.of_list (List.map (fun p -> VStr p) pieces)))
+     | _ -> panic "split on non-string")
+```
+
+`"" .split(sep)` returns `[""]`. `s.split("")` is rejected with a panic in v0 (defining "split on empty" is ambiguous; the type checker can later enforce a non-empty-separator precondition).
+
+### Deferred
+
+`.chars()` returning an iterator/array of chars. Indexed access `s[i]`. Unicode-aware operations. `.replace`, `.to_lower`, `.to_upper` — add as demos demand. String builders / `StringBuilder` host type only if performance bites in practice (string `+` is fine for now).
+
+-----
+
+## Stage 10 — Closures
+
+### Example
+
+```di
+fn with_retry(times: I64, action: fn() -> I64) -> I64
+    requires {Logger}
+    raises   {GiveUp}
+{
+    let mut i = 0
+    loop {
+        try {
+            return action()
+        } catch _ {
+            i = i + 1
+            Logger.info("attempt ${i} failed")
+            if i >= times { raise GiveUp }
+        }
+    }
+}
+
+fn main() {
+    provide { Logger = StdoutLogger() @ Process } in {
+        let result = with_retry(3, || {
+            Logger.info("attempting")
+            42
+        })
+        print(result)
+    }
+}
+```
+
+Expected:
+```
+attempting
+42
+```
+
+### What's new
+
+Lambda syntax `|params| body` (and the parenthesised-body form `|params| { ...; expr }`). First-class function values with type `fn(T1, T2) -> R`. Closures capture their lexical environment by reference at the point of definition, **including the capability stack** at that point.
+
+Effect rows on closures are inferred but stored on the value, not statically checked yet. The type checker will consume them later.
+
+This stage explicitly does **not** ship row-polymorphic generics (`fn with_logging<R, E>(f: fn() -> Unit requires {R} raises {E})`). Closures work; passing them around works; capturing capabilities works. Row variables and quantification are deferred to the type-checker phase — they pay rent there, not in the interpreter.
+
+### Interpreter changes
+
+AST:
+
+```ocaml
+type expr =
+  | ...
+  | Lambda of { params : (ident * ty option) list; body : expr }
+```
+
+Value:
+
+```ocaml
+type value =
+  | ...
+  | VClosure of {
+      params : (ident * ty option) list;
+      body   : expr;
+      env    : env;                 (* captured value environment *)
+      caps   : cap_env;             (* captured capability stack *)
+    }
+```
+
+Eval:
+
+```ocaml
+| Lambda { params; body } ->
+    VClosure { params; body; env = ctx.env; caps = ctx.caps }
+
+(* extend Call to handle closure values *)
+| Call { fn; args } ->
+    (match eval ctx fn with
+     | VClosure { params; body; env; caps } ->
+         let arg_vs = List.map (eval ctx) args in
+         if List.length params <> List.length arg_vs then
+           failwith "arity mismatch";
+         let env' = List.fold_left2
+           (fun e (p, _) v -> Env.bind e p ~mut:false v)
+           env params arg_vs
+         in
+         let defers = ref [] in
+         let ctx' = { ctx with env = env'; caps; defers } in
+         Fun.protect
+           ~finally:(fun () -> List.iter (fun t -> try t () with _ -> ()) !defers)
+           (fun () -> try eval ctx' body with Return_exn v -> v)
+     | VFn fd -> call_fn ctx fd (List.map (eval ctx) args)
+     | _ -> panic "call of non-function")
+```
+
+The `caps` capture is the load-bearing piece for Stage 11: a closure defined inside a `provide { Logger = ... } in { ... }` block carries the `Logger` binding with it, so when an HTTP server invokes the closure later (outside that lexical block), `Logger` is still resolvable. Add an explicit test where a closure is stored in a `let`, the `provide` block exits, then the closure is invoked from outside — the capability lookup must still succeed.
+
+Free function names become callable as values: `let f = foo; f(1)` works. Extend the lookup chain in `eval (Var name)` to consult the fns table after env.
+
+Activations created by closure calls own their own `defers` ref (matching the Stage 6 discipline for `fn` calls). Defers registered inside a lambda body fire when the lambda's call returns, not when the lambda is constructed.
+
+### Deferred
+
+Row-polymorphic generics (`<R, E>` variables on function types). Polymorphic identity functions over rows. Trait-bounded generics. Closure-converted optimisations.
+
+-----
+
+## Stage 11 — HTTP server and client
+
+### Example
+
+```di
+fn main() {
+    provide {
+        Logger     = StdoutLogger()       @ Process
+        HttpServer = BlockingHttpServer() @ Process
+    } in {
+        Logger.info("listening on :8080")
+
+        HttpServer.serve(8080, |req| {
+            Logger.info("${req.method} ${req.path}")
+
+            if req.path.starts_with("/echo/") {
+                Response { status: 200, body: req.path }
+            } else if req.path == "/health" {
+                Response { status: 200, body: "ok" }
+            } else {
+                Response { status: 404, body: "not found" }
+            }
+        })
+    }
+}
+```
+
+Run with `dilang run service.di`; from another terminal, `curl localhost:8080/health` → `ok`.
+
+### What's new
+
+The **first network-facing capability**. Stdlib registers the data types and the host impls register against them.
+
+```di
+capability HttpServer @ Process {
+    fn serve(port: I64, handler: fn(Request) -> Response)
+}
+
+capability HttpClient @ Process {
+    fn get(url: Str) -> Response                raises {HttpError}
+    fn post(url: Str, body: Str) -> Response    raises {HttpError}
+}
+
+struct Request  { method: Str, path: Str, headers: [(Str, Str)], body: Str }
+struct Response { status: I64, body: Str }
+enum HttpError { ConnectionFailed(reason: Str); BadStatus(code: I64); InvalidUrl(url: Str) }
+```
+
+Host impls landed in this stage:
+
+- `BlockingHttpServer` — single connection at a time. Backed by `Eio.Net.run_server` with `max_connections = 1`. Each request runs the handler closure to completion before the next `accept`. User code sees a blocking model; the host hides the fiber.
+- `BlockingHttpClient` — synchronous `get`/`post`. Backed by `cohttp-eio`, or `Eio.Process` shelling out to `curl` if the cohttp dependency is too heavy in v0. Whichever is faster to land.
+
+Both impls require an `Eio.Switch.t`. Reuse the per-`provide` switch already stashed on the cap_frame (set up in Stage 3, unused until now).
+
+### Interpreter changes
+
+AST: nothing new. This stage is closures + a host capability.
+
+Host stdlib changes:
+
+- Register `Request`, `Response` structs and `HttpError` enum at startup. Use the same path as `Option`/`Some`/`None` from Stage 5 (`ctx.user_constructors` for structs, `ctx.variants` for the enum).
+- Implement `BlockingHttpServer` as a `DHost` impl. The `serve` method:
+  1. Opens (or reuses) the per-`provide` `Eio.Switch.t`.
+  2. Calls `Eio.Net.run_server ~max_connections:1 ~on_error:Logger.error` against an `Eio.Net.listening_socket`.
+  3. For each accepted connection: parses HTTP/1.1 request → `Request` struct value, invokes the closure via the same path `Call` uses for `VClosure`, formats the returned `Response`, writes it back.
+  4. `Ctrl-C` cancels the switch cleanly — the server's `Eio.Switch.run` unwinds, defers fire, connections close.
+
+The handler closure is a `VClosure` carrying its captured `Logger`. Invoking it from inside the host uses the captured `caps` — exactly what Stage 10 set up. **Verify with a test** that a `provide` outside `HttpServer.serve` is visible inside the handler, and that swapping `StdoutLogger` for a different impl at `main` changes the handler's output with no other code changes.
+
+### CLI
+
+`dilang run service.di` blocks in the accept loop. Add `dilang run --max-requests N service.di` so smoke tests can run the server, send a few requests, and have it exit deterministically. The `--max-requests` flag is interpreter-level, not exposed to user code — it just sets a counter the `BlockingHttpServer` consults.
+
+### Test posture
+
+Don't try to bind ephemeral ports inside `alcotest` cases on every CI run yet. The deliverable is:
+
+1. `test/programs/http_hello/service.di` running under `dilang run --max-requests 3`. A small OCaml test fixture forks `dilang run`, fires three requests via a raw socket, asserts the responses, then waits for the child to exit.
+2. A `BlockingHttpClient` test that hits the running service from inside the same fixture.
+
+Once Stage 19 (Tests) lands, an in-process `MockHttpServer` impl makes this hermetic.
+
+### Deferred
+
+- Per-request scoping (`@ Request` bindings around the handler) — Stage 12.
+- DB pool with `Lifecycle` start/shutdown — Stage 13.
+- Concurrent request handling (>1 in flight) — Stage 15 swaps `BlockingHttpServer` for `EioHttpServer`.
+- Per-request timeouts — Stage 16.
+- Streaming response bodies, chunked transfer encoding, server-sent events — Stage 17.
+- HTTPS, HTTP/2, websockets — not on the immediate roadmap.
+
+-----
+
+## Milestone 11.5 — HTTP service with route table
+
+No new language features. Ship a complete program at `test/programs/router/service.di` that exercises everything through Stage 11:
+
+```di
+struct Route { method: Str, prefix: Str, handler: fn(Request) -> Response }
+
+fn route(req: Request, table: [Route]) -> Response {
+    for r in table {
+        if req.method == r.method && req.path.starts_with(r.prefix) {
+            return r.handler(req)
+        }
+    }
+    Response { status: 404, body: "no route" }
+}
+
+fn health(_: Request) -> Response { Response { status: 200, body: "ok" } }
+
+fn echo(req: Request) -> Response {
+    Response { status: 200, body: req.body }
+}
+
+fn main() {
+    provide {
+        Logger     = StdoutLogger()       @ Process
+        HttpServer = BlockingHttpServer() @ Process
+    } in {
+        let table = [
+            Route { method: "GET",  prefix: "/health", handler: health },
+            Route { method: "POST", prefix: "/echo",   handler: echo },
+        ]
+
+        HttpServer.serve(8080, |req| {
+            Logger.info("${req.method} ${req.path}")
+            route(req, table)
+        })
+    }
+}
+```
+
+This is the **first dilang program worth showing someone**. It exercises: closures (handler refs), arrays (route table), strings (path matching, body), structs (`Request`, `Response`, `Route`), capabilities + `provide` (Logger swap), control flow (`for`, `if`, `return`).
+
+Add to `dune runtest` as a smoke test: launch the service via `dilang run --max-requests 6`, fire `health` / `echo` / unknown-route / wrong-method requests from a fixture, assert the four responses, wait for clean exit.
+
+Goal of this milestone: validate the closure+capability story against a running program before introducing the more invasive machinery (scopes, Lifecycle, Wiring) in Stages 12–14.
+
+-----
+
+## Stage 12 — Scopes
 
 ### Example
 
@@ -720,7 +1244,7 @@ Static enforcement that a `@ Request`-scoped capability isn't bound or used outs
 
 -----
 
-## Stage 8 — Lifecycle
+## Stage 13 — Lifecycle
 
 ### Example
 
@@ -844,7 +1368,7 @@ Per-scope-instance Lifecycle cost analysis (design §5.8). The interpreter runs 
 
 -----
 
-## Stage 9 — Wiring values
+## Stage 14 — Wiring values
 
 ### Example
 
@@ -930,93 +1454,67 @@ Static "same binding set on every call" check (DEC-003) — type-checker phase. 
 
 -----
 
-## Stage 10 — Closures and row-polymorphic middleware
+## Milestone 14.5 — Service with `@ Request`, DB pool, dev/test/prod wirings
 
-### Example
+No new language features. Extend the Stage 11.5 router service to use everything from Stages 12–14:
 
 ```di
-fn with_logging<R, E>(f: fn() -> Unit requires {R} raises {E})
-    requires {R, Logger}
-    raises {E}
-{
-    Logger.info("before")
-    f()
-    Logger.info("after")
+scope Request
+
+capability RequestId @ Request { fn get() -> Str }
+capability ReqLogger @ Request { fn info(msg: Str); fn error(msg: Str) }
+capability TaskDb    @ Process { fn list_open() -> [Task]; fn create(title: Str) -> Task }
+
+struct PgTaskDb { pool: ConnPool }
+impl TaskDb for PgTaskDb { ... }
+impl Lifecycle for PgTaskDb {
+    fn start()                  { self.pool.warm() }
+    fn shutdown(_: ExitReason)  { self.pool.drain() }
+}
+
+fn prod_runtime() -> Wiring {
+    provide {
+        Logger     = JsonLogger()                   @ Process
+        TaskDb     = PgTaskDb { pool: ConnPool.new(env("DATABASE_URL"), 16) } @ Process
+        HttpServer = BlockingHttpServer()           @ Process
+    }
+}
+
+fn test_runtime() -> Wiring {
+    provide {
+        Logger     = TestLogger()                   @ Process
+        TaskDb     = InMemoryTaskDb()               @ Process
+        HttpServer = MockHttpServer()               @ Process
+    }
 }
 
 fn main() {
-    provide { Logger = StdoutLogger() @ Process } in {
-        with_logging(|| {
-            Logger.info("body")
+    provide { using prod_runtime() } in {
+        HttpServer.serve(8080, |req| {
+            provide @ Request {
+                RequestId = RandomRequestId()                    @ Request
+                ReqLogger = PrefixedLogger { prefix: RequestId.get() } @ Request
+            } in {
+                route(req)
+            }
         })
     }
 }
 ```
 
-Expected:
-```
-before
-body
-after
-```
+Goals:
 
-### What's new
+- `Lifecycle.start` warms the pool once at process start; `Lifecycle.shutdown` drains it on `Ctrl-C`. Add a `defer` in `main` and a test that asserts the pool's connection count drops to zero on exit.
+- `@ Request` bindings are fresh per incoming request. `RequestId` is a UUID; `ReqLogger` prefixes log lines with it. Two concurrent requests (mocked) show interleaved logs with distinct prefixes.
+- Swapping `prod_runtime()` for `test_runtime()` at `main` changes nothing else in the program. Run the same handler logic under both; assert the test variant produces deterministic output.
 
-Lambda syntax `|params| body`, function-type syntax with `requires`/`raises` rows, row-variable generics (`<R, E>`).
+This is the milestone where dilang's claims about DI become demonstrable on a running backend service, not on paper. It also exposes the seams where the next stages must work — concurrent request handling (Stage 15), per-request timeouts (Stage 16), streaming responses (Stage 17).
 
-The closure captures the lexical environment, including the *capability* environment, at creation time. When the inner `Logger.info("body")` runs through `f()`, the `Logger` lookup walks the closure's captured `cap_env`, which is the same one `with_logging` is using — so it works without any row plumbing at runtime.
-
-### Interpreter changes
-
-AST:
-
-```ocaml
-type expr = ... | Lambda of { params : ident list; body : expr }
-
-(* fn types are stored on declarations but not used by the eval loop in v0 *)
-```
-
-Value:
-
-```ocaml
-type value = ... | VFn of fn_value
-
-and fn_value = {
-  params  : ident list;
-  body    : Ast.expr;
-  closure : env;          (* values + caps captured at lambda creation *)
-}
-```
-
-Eval:
-
-```ocaml
-| Lambda { params; body } ->
-    VFn { params; body; closure = ctx.env }
-
-| Call { fn; args } ->
-    (match eval ctx fn with
-     | VFn f ->
-         let arg_vs = List.map (eval ctx) args in
-         let env' = { f.closure with
-                      values = List.combine f.params (List.map ref arg_vs)
-                               @ f.closure.values } in
-         let defers = ref [] in
-         let ctx' = { ctx with env = env'; defers } in
-         Fun.protect ~finally:(run_defers defers)
-           (fun () -> try eval ctx' f.body with Return_exn v -> v)
-     | _ -> panic "not callable")
-```
-
-Generic syntax with row variables (`<R, E>`) is parsed and stored on the fn_decl but ignored by the interpreter; rows aren't enforced. The example works because closure capture handles the actual cap routing.
-
-### Deferred
-
-Real row-polymorphic inference and unification (type checker). Trait bounds on generic parameters (e.g., `<T: Ord>`) — parsed, ignored at runtime.
+Ship under `test/programs/task_service/`. Three sub-targets: `service.di` (the program), `prod_wiring.di` and `test_wiring.di` (the two `Wiring` modules), and a runtest entry that exercises the test wiring end-to-end.
 
 -----
 
-## Stage 11 — Concurrency via IO
+## Stage 15 — Concurrency via IO
 
 ### Example
 
@@ -1082,7 +1580,7 @@ Host stdlib:
 
 -----
 
-## Stage 12 — Cancellation
+## Stage 16 — Cancellation
 
 ### Example
 
@@ -1168,7 +1666,7 @@ Fine-grained cancellation policy choices, structured concurrency lints. The Eio 
 
 -----
 
-## Stage 13 — Streams and iteration
+## Stage 17 — Streams
 
 ### Example
 
@@ -1197,7 +1695,9 @@ Expected: `60`.
 
 ### What's new
 
-`stream { ... yield x ... }` produces a `Stream<T>`. `for x in iter { body }` iterates. `loop { ... }` infinite loop. `break`/`continue`. `let mut`-style reassignment (introduced in Stage 1 but exercised here).
+`stream { ... yield x ... }` produces a `Stream<T>` — a suspending iterator whose producer runs on its own fiber and rendezvous with the consumer on each `yield`. `for x in stream { body }` consumes it.
+
+Loops, `break`/`continue`, mutable reassignment, and `for x in xs` over arrays are already shipped (Stages 7 and 8). This stage adds **the suspending variant**: a `for` over a `VStream` blocks the producer until the consumer takes, and cancelling the consumer kills the producer fiber (so its defers fire).
 
 ### Interpreter changes
 
@@ -1206,14 +1706,11 @@ AST:
 ```ocaml
 type expr =
   | ...
-  | Stream  of expr
-  | Yield   of expr
-  | Loop    of expr
-  | For     of { var : ident; iter : expr; body : expr }
-  | Break
-  | Continue
-  | Assign  of { name : ident; rhs : expr }
+  | Stream of expr             (* the producer body *)
+  | Yield  of expr
 ```
+
+`For` already exists (Stage 8). Extend its eval arm to branch on the runtime type of the iterator value (`VArray` → Array.iter loop; `VStream` → blocking take loop).
 
 Value:
 
@@ -1221,18 +1718,15 @@ Value:
 type value = ... | VStream of stream_handle
 
 and stream_handle = {
-  chan      : value Eio.Stream.t;         (* capacity 0 — rendezvous *)
-  producer  : Eio.Fiber.t;                (* cancellable on drop *)
-  closed    : bool ref;
+  chan     : value Eio.Stream.t;     (* capacity 0 — rendezvous *)
+  producer : Eio.Switch.t;           (* cancel to stop the producer fiber *)
+  closed   : bool ref;
 }
 ```
 
 Eval:
 
 ```ocaml
-exception Break_exn
-exception Continue_exn
-
 | Stream body ->
     let chan = Eio.Stream.create 0 in
     let closed = ref false in
@@ -1242,52 +1736,113 @@ exception Continue_exn
         ignore (eval ctx' body);
         closed := true
       with _ -> closed := true);
-    VStream { chan; closed; ... }
+    VStream { chan; closed; producer = ctx.sw }
 
 | Yield e ->
     (match ctx.yield_to with
      | Some chan -> Eio.Stream.add chan (eval ctx e); VUnit
      | None -> panic "yield outside stream")
 
+(* extend the existing For arm to handle VStream as well as VArray *)
 | For { var; iter; body } ->
-    let s = eval ctx iter in
-    (match s with
+    (match eval ctx iter with
+     | VArray a -> (* Stage 8 path, unchanged *)
      | VStream sh ->
          let rec loop () =
            if !(sh.closed) then ()
            else
-             let v = Eio.Stream.take sh.chan in       (* blocks producer until take *)
-             let env' = { ctx.env with values = (var, ref v) :: ctx.env.values } in
-             (try eval { ctx with env = env' } body |> ignore
+             let v = Eio.Stream.take sh.chan in
+             let env' = Env.bind ctx.env var ~mut:false v in
+             (try ignore (eval { ctx with env = env' } body)
               with Continue_exn -> ());
              loop ()
          in
          (try loop () with Break_exn -> ());
          VUnit
-     | _ -> panic "for over non-iterator")
-
-| Loop body ->
-    (try while true do ignore (eval ctx body) done with Break_exn -> ()); VUnit
-
-| Break    -> raise Break_exn
-| Continue -> raise Continue_exn
-
-| Assign { name; rhs } ->
-    let r = List.assoc name ctx.env.values in
-    r := eval ctx rhs; VUnit
+     | _ -> panic "for over non-iterable")
 ```
 
 When the consumer `break`s (or its enclosing scope ends), cancel the producer fiber so its `defer`s run.
 
-Iteration for non-Stream iterators (e.g. arrays): in v0, only Streams iterate. Adding `Iterator<T>` trait dispatch and desugaring `for x in iter` to `loop { match iter.next() with Some v -> ... | None -> break }` is a follow-on.
-
 ### Deferred
 
-Generic `Iterator<T>` trait dispatch on values, lazy lists, finite arrays as iterators.
+A general `Iterator<T>` trait so user types can implement iteration. `stream`-of-stream composition (lazy `.map` / `.filter` over streams) — buildable in user code once row-polymorphic closures land in the type checker.
 
 -----
 
-## Stage 14 — Tests as a top-level form
+## Stage 18 — Stdin and filesystem capabilities
+
+### Example
+
+```di
+fn main() {
+    provide {
+        Logger      = StdoutLogger() @ Process
+        StdinReader = RealStdin()    @ Process
+        FsRead      = RealFs()       @ Process
+    } in {
+        let path = StdinReader.line() ?? "/etc/hostname"
+        try {
+            let contents = FsRead.read_to_string(path)
+            Logger.info("read ${contents.len()} bytes from ${path}")
+            print(contents.trim())
+        } catch FileNotFound(p) -> Logger.error("missing: ${p}")
+    }
+}
+```
+
+### What's new
+
+The capabilities a backend service actually needs alongside HTTP:
+
+```di
+capability StdinReader @ Process {
+    fn line() -> Str?                         // None on EOF
+    fn read_to_end() -> Str
+}
+
+capability FsRead @ Process {
+    fn read_to_string(path: Str) -> Str       raises {FileNotFound, IoError}
+    fn exists(path: Str) -> Bool
+}
+
+capability FsWrite @ Process {
+    fn write_string(path: Str, body: Str)     raises {IoError}
+    fn append_string(path: Str, body: Str)    raises {IoError}
+}
+
+enum FileNotFound { FileNotFound(path: Str) }
+enum IoError      { IoError(reason: Str) }
+```
+
+These complete the "real I/O" story for backend services: config loading from disk, log file output, reading request bodies from stdin in test harnesses. Without these, a dilang program cannot read its own configuration — the language has been pretending file I/O exists in the design docs without an interpreter path for it.
+
+### Interpreter changes
+
+AST: nothing new.
+
+Host stdlib:
+
+- `RealStdin` — backed by `Eio.Buf_read` over `stdin`. `line()` returns `Some s` until EOF, then `None`.
+- `RealFs` — `Eio.Path` reads under the cwd. Errors translate to `FileNotFound` (when `Eio.Fs.Not_found` is raised) or `IoError` (everything else).
+- `RealFsWrite` — same but for writes. Append is `Eio.Path.with_open_out ~append:true`.
+
+Test impls (used by Stage 19):
+
+- `ScriptedStdin { lines: [Str] }` — returns lines from a fixed list, then `None`.
+- `InMemoryFs { files: [(Str, Str)] }` — read/write against an association list.
+
+### Test posture
+
+For each new capability, ship one runtest that exercises the real impl against a tempfile fixture, and one that uses the test impl. The test impls are also what Milestone 14.5's `test_runtime()` should use for the `Config` reader and any log-to-file paths.
+
+### Deferred
+
+Directory walks, file watching, permissions, symlinks. Add as demos demand. Async file I/O is fine as-is — Eio's path APIs already suspend cooperatively.
+
+-----
+
+## Stage 19 — Tests as a top-level form
 
 ### Example
 
@@ -1420,18 +1975,23 @@ type expr =
   | Match        of expr * (pattern * expr) list
   (* Stage 6 *)
   | Defer        of expr
-  (* Stage 10 *)
-  | Lambda       of { params : ident list; body : expr }
-  (* Stage 12 *)
-  | Uncancel     of expr
-  | Select       of (expr * expr) list
-  (* Stage 13 *)
-  | Stream       of expr
-  | Yield        of expr
+  (* Stage 7 *)
   | Loop         of expr
-  | For          of { var : ident; iter : expr; body : expr }
+  | While        of { cond : expr; body : expr }
   | Break
   | Continue
+  (* Stage 8 *)
+  | ArrayLit     of expr list
+  | Index        of { target : expr; idx : expr }
+  | For          of { var : ident; iter : expr; body : expr }
+  (* Stage 10 *)
+  | Lambda       of { params : (ident * ty option) list; body : expr }
+  (* Stage 16 *)
+  | Uncancel     of expr
+  | Select       of (expr * expr) list
+  (* Stage 17 *)
+  | Stream       of expr
+  | Yield        of expr
   (* Misc *)
   | Panic        of expr
   | Sql          of string_part list
@@ -1456,9 +2016,9 @@ type decl =
   | DImpl   of impl_decl
   | DStruct of struct_decl
   | DEnum   of enum_decl
-  | DScope  of ident                                   (* Stage 7 *)
+  | DScope  of ident                                   (* Stage 12 *)
   | DType   of { name : ident; def : ty }
-  | DTest   of { name : string; body : expr }          (* Stage 14 *)
+  | DTest   of { name : string; body : expr }          (* Stage 19 *)
 
 type program = decl list
 ```
@@ -1478,14 +2038,15 @@ type value =
   | VStruct of { ty : type_name; fields : (string * value ref) list }
   | VEnum   of { ty : type_name; tag : string; payload : value list }
   | VOpt    of value option                  (* Stage 5 *)
+  | VArray  of value array ref               (* Stage 8 *)
   | VFn     of fn_value                      (* Stage 10 *)
   | VImpl   of impl_value                    (* Stage 3 *)
   | VHost   of host_value                    (* OCaml-defined built-ins *)
-  | VWiring of wiring                        (* Stage 9 *)
-  | VStream of stream_handle                 (* Stage 13 *)
-  | VFuture of future_handle                 (* Stage 11 *)
-  | VGroup  of group_handle                  (* Stage 11 *)
-  | VCancel of cancel_token                  (* Stage 12 *)
+  | VWiring of wiring                        (* Stage 14 *)
+  | VStream of stream_handle                 (* Stage 17 *)
+  | VFuture of future_handle                 (* Stage 15 *)
+  | VGroup  of group_handle                  (* Stage 15 *)
+  | VCancel of cancel_token                  (* Stage 16 *)
   | VDur    of float                         (* seconds *)
 
 and fn_value = {
@@ -1500,7 +2061,7 @@ and impl_value = {
   cap_env       : cap_env;                   (* captured at binding time *)
   methods       : (string * impl_method_dispatch) list;
   drop          : (unit -> unit) option;
-  lifecycle     : lifecycle option;          (* Stage 8 *)
+  lifecycle     : lifecycle option;          (* Stage 13 *)
 }
 
 and impl_method_dispatch =

@@ -271,6 +271,74 @@ let stress_long_optchain () =
   let out = run_string (Buffer.contents b) in
   Alcotest.(check string) "long optchain" "end\n" out
 
+let stress_defers_100 () =
+  (* 100 defers in one function. Tag each by its registration index and verify
+     LIFO ordering: defer #99 fires first, defer #0 fires last. *)
+  let n = 100 in
+  let b = Buffer.create (32 * n + 64) in
+  Buffer.add_string b "fn many() {\n";
+  for i = 0 to n - 1 do
+    Buffer.add_string b (Printf.sprintf "    defer print(\"d%d\")\n" i)
+  done;
+  Buffer.add_string b "    print(\"body\")\n}\nfn main() { many() }\n";
+  let out = run_string (Buffer.contents b) in
+  let lines = String.split_on_char '\n' out in
+  Alcotest.(check int) "line count" (n + 2) (List.length lines);
+  Alcotest.(check string) "body first" "body" (List.nth lines 0);
+  Alcotest.(check string) "newest defer fires first"
+    (Printf.sprintf "d%d" (n - 1)) (List.nth lines 1);
+  Alcotest.(check string) "oldest defer fires last"
+    "d0" (List.nth lines n)
+
+let stress_deep_defer_raise () =
+  (* Recursion ~50 frames deep; each frame registers one defer tagged with its
+     depth; deepest frame raises; outer try catches. Defers fire in reverse-
+     stack order (deepest first). *)
+  let n = 50 in
+  let b = Buffer.create 2048 in
+  Buffer.add_string b "enum E { Boom }\n";
+  Buffer.add_string b
+    (Printf.sprintf
+       "fn descend(d: I64) raises {E} {\n\
+       \    defer print(\"defer d=${d}\")\n\
+       \    if d == %d { raise Boom }\n\
+       \    descend(d + 1)\n\
+       }\n" n);
+  Buffer.add_string b
+    "fn main() {\n\
+    \    try { descend(0) } catch { Boom -> print(\"caught\") }\n\
+    }\n";
+  let out = run_string (Buffer.contents b) in
+  let lines = String.split_on_char '\n' out in
+  (* n+1 frames (depths 0..n) each print one defer line, then "caught".
+     With trailing newline, split yields (n+1)+1+1 = n+3 elements (last empty). *)
+  Alcotest.(check int) "line count" (n + 3) (List.length lines);
+  Alcotest.(check string) "deepest first"
+    (Printf.sprintf "defer d=%d" n) (List.nth lines 0);
+  Alcotest.(check string) "shallowest last"
+    "defer d=0" (List.nth lines n);
+  Alcotest.(check string) "caught after defers"
+    "caught" (List.nth lines (n + 1))
+
+let stress_defer_return_in_if () =
+  (* Defer registered, then `return` from inside an `if` branch. Defer must
+     still fire on that exit path. *)
+  let src =
+    "fn pick(x: I64) -> Str {\n\
+    \    defer print(\"defer fired\")\n\
+    \    if x == 0 { return \"zero\" }\n\
+    \    print(\"after if\")\n\
+    \    return \"nonzero\"\n\
+    }\n\
+     fn main() {\n\
+    \    print(pick(0))\n\
+    \    print(pick(1))\n\
+    }\n"
+  in
+  let out = run_string src in
+  Alcotest.(check string) "defer + return in if"
+    "defer fired\nzero\nafter if\ndefer fired\nnonzero\n" out
+
 let stress_interpolation () =
   let n = 200 in
   let b = Buffer.create (40 * n) in
@@ -460,6 +528,27 @@ let neg_some_arity () =
       run_string
         "fn main() { print(Some(1, 2)) }\n")
 
+let err_defer_body_raises_is_swallowed () =
+  (* A defer body raises a `Dilang_error`. v0 policy: swallow.
+     Verifies (a) the swallow doesn't break later defers in the same
+     activation, (b) the inner raise doesn't propagate out of the activation.
+     Defers fire LIFO, so the raising one (registered last) fires first. *)
+  let src =
+    "enum E { Boom }\n\
+     fn noisy() {\n\
+    \    defer print(\"d1\")\n\
+    \    defer raise Boom\n\
+    \    print(\"body\")\n\
+     }\n\
+     fn main() {\n\
+    \    noisy()\n\
+    \    print(\"after\")\n\
+     }\n"
+  in
+  let out = run_string src in
+  Alcotest.(check string) "defer raise is swallowed"
+    "body\nd1\nafter\n" out
+
 let neg_field_on_non_impl () =
   check_raises_substr "field on non-impl" "field access on non-impl value"
     (fun () ->
@@ -505,6 +594,14 @@ let () =
       ; Alcotest.test_case "05d_re_raise"  `Quick (stage_test ~name:"05d_re_raise")
       ; Alcotest.test_case "05e_re_tag"    `Quick (stage_test ~name:"05e_re_tag")
       ]
+    ; "stage6",
+      [ Alcotest.test_case "06_defer"            `Quick (stage_test ~name:"06_defer")
+      ; Alcotest.test_case "06b_lifo"            `Quick (stage_test ~name:"06b_lifo")
+      ; Alcotest.test_case "06c_defer_on_raise"  `Quick (stage_test ~name:"06c_defer_on_raise")
+      ; Alcotest.test_case "06d_defer_in_method" `Quick (stage_test ~name:"06d_defer_in_method")
+      ; Alcotest.test_case "06e_nested_fns"      `Quick (stage_test ~name:"06e_nested_fns")
+      ; Alcotest.test_case "06f_block_scoped"    `Quick (stage_test ~name:"06f_block_scoped")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -519,6 +616,9 @@ let () =
       ; Alcotest.test_case "deep_if_else_60"       `Quick stress_deep_if_else
       ; Alcotest.test_case "deep_raise_50"         `Quick stress_deep_raise
       ; Alcotest.test_case "long_optchain"         `Quick stress_long_optchain
+      ; Alcotest.test_case "defers_100"             `Quick stress_defers_100
+      ; Alcotest.test_case "deep_defer_raise_50"    `Quick stress_deep_defer_raise
+      ; Alcotest.test_case "defer_return_in_if"     `Quick stress_defer_return_in_if
       ]
     ; "errors",
       [ Alcotest.test_case "cap_not_in_scope"    `Quick neg_cap_not_in_scope
@@ -539,5 +639,7 @@ let () =
       ; Alcotest.test_case "coalesce_lhs_not_opt"  `Quick neg_coalesce_lhs_not_option
       ; Alcotest.test_case "if_cond_not_bool"      `Quick neg_if_cond_not_bool
       ; Alcotest.test_case "some_arity"            `Quick neg_some_arity
+      ; Alcotest.test_case "defer_body_raises_swallowed"
+          `Quick err_defer_body_raises_is_swallowed
       ]
     ]

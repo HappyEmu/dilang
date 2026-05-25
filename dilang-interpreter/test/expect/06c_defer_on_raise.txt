@@ -1,0 +1,4 @@
+before raise
+d2 (registered second, fires first)
+d1 (registered first, fires last)
+caught Boom

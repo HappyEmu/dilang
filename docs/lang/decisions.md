@@ -71,3 +71,42 @@ A previous version of this decision required every argument after the first to b
 Revisit when the typechecker lands; getting the rule right benefits from having type info to surface mismatches with good error messages.
 
 - Currently active position: fully positional calls. Reviewer-readability is left to writers using local variable names well, until the right named-args shape is figured out.
+
+## DEC-011 — Defer / error interaction (Deferred)
+Status: Deferred (v0 interpreter behavior noted) · Cites: syntax §14, design §2.5, §2.10
+Two related open questions about how `defer` interacts with `raises`. Park both until `raises` is statically enforced; the answers want type information.
+
+1. **What if a defer body itself raises?** Prior art splits:
+   - Zig / Swift: ban at the type level — defer bodies must be unfailable; failing variants (Zig's `errdefer`) replace the in-flight error explicitly.
+   - Go: latest panic wins; earlier ones are lost.
+   - Interpreter v0 (Stage 6): swallow silently; subsequent defers still run; inner raise does not propagate. Documented in `eval.ml`'s `run_defers`. Chosen to avoid masking the original raise *and* to keep cleanup paths from dropping silently mid-list — but it does drop the inner error.
+   Likely landing: Zig's stance. Once `raises` rows are checked, require defer bodies to have an empty `raises` row; lift the v0 swallow to a compile error.
+2. **Should `errdefer` exist?** A defer that fires only on error-exit paths, not on normal return. Useful for "undo this allocation if we're bailing out." Easy to slot in once the activation distinguishes exit paths at the type level. Adds one keyword; symmetric with `defer` for the success path. Open whether to also add `successdefer` (D's `scope(success)`) or stop at the two-way split.
+
+- Rejected for v0 (1): propagate inner raise — masks original raise; reviewer can't tell which fired
+- Rejected for v0 (1): "last raise wins" — confusing; doesn't compose with multiple defers
+- Rejected (preemptively, for the future shape): runtime `recover()` à la Go — §2.10 ("no exception swallowing") is a hard line
+
+## DEC-012 — `defer` is block-scoped
+Status: Active · Cites: syntax §14, design §2.5, §2.10
+A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block (fall-through, `return`, `break`, `continue`, raised error, cancellation, panic). Each `{ ... }` in the surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `provide ... in` body, bare block expression. Defers within a block fire LIFO. The deferred expression is evaluated at fire time, not at registration (so reads of mutable state see scope-exit values).
+
+Matches Zig / Swift / D `scope(exit)`. Diverges from Go (function-scoped + arguments captured at registration).
+
+- Rejected: function-scoped (Go-style) — turns the obvious `for { defer release(x) }` into a leak that holds N resources until function exit. Forces awkward refactors (extract the loop body into a helper fn). Fails the "deterministic cleanup next to its setup" goal from §2.5 because cleanup runs far from the setup site.
+- Rejected: scope-on-keyword-only (`defer` block-scoped, but a separate `func_defer` for function-scoped) — two cleanup keywords doubles the surface area. Function-scoped cleanup is expressible by registering the defer at the top of the fn body, where the scope *is* the function.
+- Rejected: per-`try`-only scoping — special-cases one construct; reviewer can't predict scope from the keyword alone.
+
+Interpreter note (Stage 6): implemented by wrapping every block built from `{` ... `}` with `Fun.protect`, with a fresh per-scope `defers` ref swapped onto `ctx`. Activation boundaries (`call_fn`, `DUser`) no longer own defer state — the fn body's own `{ ... }` is the activation's defer scope.
+
+## DEC-013 — `loop` is an expression; `while`/`for` are statements
+Status: Active · Cites: syntax §11, design §2.10
+`loop { ... }` evaluates to the value carried by `break v` (or `VUnit` if `break;` without value). A `loop` with no reachable `break` has type `Never`. `while cond { ... }` and `for x in xs { ... }` always evaluate to `VUnit` — they may not execute the body at all, so there is no well-defined value to yield.
+
+Matches Rust. The asymmetry is the right call: `loop` is the construct you reach for when you want to compute a result that requires iteration with conditional exit (retry loops, polling), and `break v` is the clean idiom for "here's the answer." `while`/`for` are predicate-driven and the natural return is "done."
+
+- Rejected: all loops statement-shaped (the original Stage-7 plan) — forces an out-of-band mutable binding for "the value the loop computed," which is exactly the pattern `loop`/`break v` exists to remove.
+- Rejected: all loops expression-shaped — `while`'s value is undefined when the body never runs; no good answer that doesn't introduce `Option` at every use site.
+- Rejected: `break v` allowed in `while`/`for` — only useful when the body runs at least once, and the type checker can't prove that without flow analysis we don't want to require.
+
+Interpreter (Stage 7): `Break_exn` carries an optional value (`Break_exn of value`; bare `break` → `Break_exn VUnit`). The `Loop` arm catches and returns the carried value; `While` / `For` arms catch and discard, returning `VUnit`.

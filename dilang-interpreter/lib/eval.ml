@@ -6,6 +6,11 @@ exception Dilang_error of { tag : string; payload : value list }
 
 let type_err msg = failwith ("type error: " ^ msg)
 
+(* v0 defer-raises-inside-defer policy: swallow.
+   TODO: revisit (DEC entry) once we have stderr/diagnostics or panic. *)
+let run_defers (thunks : (unit -> unit) list) =
+  List.iter (fun t -> try t () with _ -> ()) thunks
+
 let rec eval_binop op a b =
   match op, a, b with
   | Add, VInt x, VInt y -> VInt (Int64.add x y)
@@ -107,6 +112,27 @@ let rec eval (ctx : ctx) = function
       eval_binop op va vb
   | Return e ->
       raise (Return_exn (eval ctx e))
+  | Defer body ->
+      (* Block-scoped (DEC-012). Pushes head-first onto whichever defers ref
+         the innermost surrounding `Scope` swapped onto `ctx`, so the most-
+         recently-registered defer in this block fires first. Body is captured
+         but evaluated at fire time — reads of mutable state see scope-exit
+         values. To capture-at-registration, bind to an immutable local first. *)
+      let ctx_at_reg = ctx in
+      let thunk () = ignore (eval ctx_at_reg body) in
+      ctx.defers := thunk :: !(ctx.defers);
+      VUnit
+  | Scope body ->
+      (* Every surface `{ ... }` reduces to a `Scope`. Swap in a fresh defers
+         frame; run the body inside `Fun.protect` so the frame's defers fire
+         on every exit path (fall-through, `return` / `raise` / Stage-7 break
+         / continue / Stage-16 cancellation). Per-thunk exceptions are
+         swallowed inside `run_defers` (DEC-011 v0). *)
+      let frame = ref [] in
+      let ctx' = { ctx with defers = frame } in
+      Fun.protect
+        ~finally:(fun () -> run_defers !frame)
+        (fun () -> eval ctx' body)
   | StringInterp parts ->
       let b = Buffer.create 32 in
       List.iter (function
@@ -227,7 +253,10 @@ let rec eval (ctx : ctx) = function
            let activation_ctx =
              { ctx with env = env_with_self; caps = impl.cap_env }
            in
-           (try eval activation_ctx m.im_body with Return_exn v -> v))
+           (* Same as `call_fn`: defers belong to the method body's `Scope`
+              (DEC-012); this arm only owns the `Return_exn` catch. *)
+           try eval activation_ctx m.im_body
+           with Return_exn v -> v)
   | StructLit { ty; fields } ->
       let evaluated = List.map (fun (n, e) -> (n, eval ctx e)) fields in
       let ctor =
@@ -255,5 +284,8 @@ and call_fn (ctx : ctx) (f : fn_decl) args =
       (fun env (pname, _ty) v -> Env.extend env pname v)
       Env.empty f.params args
   in
+  (* Defers belong to the fn body's `Scope`, not to this activation
+     (DEC-012). `call_fn` only owns the `Return_exn` catch. The `Scope` that
+     wraps `f.body` runs its defers before `Return_exn` propagates here. *)
   try eval { ctx with env = env0 } f.body
   with Return_exn v -> v

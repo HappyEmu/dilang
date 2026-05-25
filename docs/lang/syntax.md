@@ -544,7 +544,13 @@ fn handle_conn(sock: Socket) requires {IO, Logger} {
 }
 ```
 
-`defer` blocks run on every exit path: normal return, raised error, cancellation, panic. They run in LIFO order. A defer block runs to completion before exit continues.
+`defer` is **block-scoped**: a deferred expression runs at the end of the smallest enclosing `{ ... }` block, on every exit path from that block — fall-through, `return`, `break`, `continue`, raised error, cancellation, panic. Defers in the same block run in LIFO order (most-recently-registered first). A defer runs to completion before exit continues. See DEC-012.
+
+Each `{ ... }` is its own defer scope: the function body, `if`/`else` branches, `loop`/`while` bodies, `try`/`catch` bodies, `provide ... in { ... }` bodies, and bare block expressions all push a fresh frame.
+
+The deferred expression is evaluated when the defer *fires*, not when it is registered (Zig-style; opposite of Go, where defer arguments are captured at the call site). Reads of mutable state inside a defer body see the state as it is at scope exit. To capture a value at registration, bind it to an immutable local first.
+
+What happens when a defer body itself raises, and whether to add `errdefer` (defer that fires only on error exit, à la Zig), are open — see DEC-011.
 
 -----
 

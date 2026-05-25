@@ -29,6 +29,13 @@ type expr =
   | Try          of { body : expr; arms : (pattern * expr) list }
   | NullCoalesce of expr * expr
   | OptChain     of { recv : expr; name : ident }
+  | Defer        of expr
+  (* `Scope e` is the runtime marker for "a user-written `{ ... }`" — every
+     surface block goes through the parser's `block:` rule, which wraps the
+     body in `Scope`. Each `Scope` pushes a fresh defers frame and runs LIFO
+     on exit (DEC-012). `Block` is the internal sequencing node produced by
+     `block_of_items` and does *not* push a frame. *)
+  | Scope        of expr
 
 and string_part =
   | SLit of string

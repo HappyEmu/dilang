@@ -1,0 +1,7 @@
+method body one
+method cleanup one
+method body two
+method cleanup two
+after both calls
+outer fn cleanup
+after outer

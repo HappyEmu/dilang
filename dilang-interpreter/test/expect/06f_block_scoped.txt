@@ -1,0 +1,10 @@
+inside if
+end of if-branch
+after if
+---
+inside provide
+end of provide body
+after provide
+---
+end of bare block
+after bare block, x = 42

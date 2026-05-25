@@ -132,6 +132,7 @@ let run_program ?(sink = Value.OutChan stdout) prog =
     ext_of;
     enum_decls;
     variants;
+    defers = ref [];
   } in
   (* Host stdlib first — registers Option<T> with Some/None in variants. Any
      user enum re-declaring Some/None is rejected below as a duplicate. *)

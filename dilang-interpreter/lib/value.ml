@@ -43,6 +43,11 @@ and ctx = {
   ext_of            : (Ast.ident, Ast.ident list) Hashtbl.t;
   enum_decls        : (Ast.type_name, Ast.enum_decl) Hashtbl.t;
   variants          : (Ast.ident, Ast.type_name * Ast.enum_variant) Hashtbl.t;
+  (* Per-activation finalizer stack. Head = most-recently-registered = first
+     to fire. `call_fn` and the `DUser` arm of `CapCall` swap in a fresh ref
+     when entering a user activation; defers therefore attach to the enclosing
+     fn/method, never to the caller. *)
+  defers            : (unit -> unit) list ref;
 }
 
 let with_cap_env (iv : impl_value) caps : impl_value = { iv with cap_env = caps }

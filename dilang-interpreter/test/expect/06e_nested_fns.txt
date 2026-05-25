@@ -1,0 +1,6 @@
+outer before inner
+inner body
+inner cleanup
+outer after inner
+outer cleanup
+main done

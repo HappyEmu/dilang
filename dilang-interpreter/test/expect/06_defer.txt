@@ -1,0 +1,6 @@
+doing a
+cleanup a
+doing b
+cleanup b
+risky cleanup
+caught
