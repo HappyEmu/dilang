@@ -50,6 +50,11 @@ type expr =
   | Continue
   | ArrayLit     of expr list
   | Index        of { target : expr; idx : expr }
+  (* Stage 10: lambda. Params may omit annotations (unlike `fn_decl.params`),
+     so the type is a `type_name option` placeholder; types are erased at
+     runtime. The braced body is a `block` (a `Scope`), giving defer ownership
+     for free; the bare-expr body has no Scope. *)
+  | Lambda       of { params : (ident * type_name option) list; body : expr }
 
 and string_part =
   | SLit of string

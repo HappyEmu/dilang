@@ -18,6 +18,7 @@ open Ast
 %token LBRACKET RBRACKET
 %token COMMA COLON ARROW AT DOT
 %token QMARK QMARK_QMARK QMARK_DOT
+%token PIPE
 %token EOF
 
 %nonassoc RETURN
@@ -40,7 +41,7 @@ expr_entry:
 
 decl:
   | FN; n = IDENT; LPAREN; ps = params; RPAREN;
-    r = ret_opt; raises_opt; req = requires_opt; b = block
+    r = ret_opt; req = requires_opt; raises_opt; b = block
     { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
   | CAPABILITY; n = IDENT; ext = extends_opt; LBRACE; ms = list(cap_method); RBRACE
     { DCap { c_name = n; c_extends = ext; c_methods = ms } }
@@ -99,6 +100,21 @@ impl_method:
 type_name:
   | t = IDENT                                    { t }
   | t = IDENT; QMARK                             { t ^ "?" }
+  (* Stage 10: function type in type position (`fn(T, ...) -> R`). Types are
+     erased at runtime, so we stringify-and-discard structurally — the result
+     is just a placeholder. Trailing `requires {...}` / `raises {...}` are NOT
+     accepted on the type itself: in the canonical example those clauses sit on
+     the enclosing `fn` decl, and accepting them here would add two shift/reduce
+     conflicts (inner-type vs outer-decl raises_opt/requires_opt). `fn` already
+     starts a top-level decl; this rule is the one plausible new conflict
+     source — see the Stage-10 report. *)
+  | FN; LPAREN; ts = type_list; RPAREN; ARROW; r = type_name
+    { "fn(" ^ String.concat ", " ts ^ ") -> " ^ r }
+
+type_list:
+  |                                              { [] }
+  | t = type_name                                { [t] }
+  | t = type_name; COMMA; rest = type_list       { t :: rest }
 
 ret_opt:
   |                       { None }
@@ -128,6 +144,14 @@ params:
 
 param:
   | n = IDENT; COLON; t = type_name                 { (n, t) }
+
+(* Stage 10: lambda params; annotations optional (unlike `param`). *)
+lambda_params:
+  |                                                          { [] }
+  | n = IDENT                                                { [(n, None)] }
+  | n = IDENT; COLON; t = type_name                          { [(n, Some t)] }
+  | n = IDENT; COMMA; rest = lambda_params                   { (n, None) :: rest }
+  | n = IDENT; COLON; t = type_name; COMMA; rest = lambda_params  { (n, Some t) :: rest }
 
 block:
   (* Every surface `{ ... }` becomes a `Scope`, which is the defer-frame
@@ -241,6 +265,16 @@ atom:
   (* §7.3 (provide @ Scope { ... }) / §7.4 (Wiring values, no `in`) — Stage 7 / Stage 9 *)
   | PROVIDE; LBRACE; es = provide_entries; RBRACE; IN; b = block
     { Provide { entries = es; scope = None; body = Some b } }
+  (* Stage 10: lambda. The body is a single `expr`; a braced `{ ... }` body
+     reaches `Scope` through `expr -> atom -> block` (giving defer ownership
+     for free), and a bare-expr body extends maximally to the right. Zero-param
+     `|| ...` falls out as two adjacent PIPE tokens with an empty param list.
+     `|` was previously unused. (A separate `... PIPE block` production would be
+     redundant — `block` is a subset of `expr` — and introduces reduce/reduce.)
+     An optional return-type annotation `|x: I64| -> I64 ...` is accepted and
+     discarded (types are erased; no static checking this stage). ARROW cannot
+     begin an `expr`, so `ret_opt` here adds no conflict. *)
+  | PIPE; ps = lambda_params; PIPE; ret_opt; e = expr    { Lambda { params = ps; body = e } }
 
 (* Stage 8: Rust-style restricted expression — used in the head position of
    `if` / `while` / `for ... in` (and `else if`) where a trailing `LBRACE`

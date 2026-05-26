@@ -64,6 +64,13 @@ let add_one = |x| x + 1
 let log_and_run = |name, f| { Logger.info(name); f() }
 ```
 
+Parameter and return types may be annotated explicitly; an annotated closure
+spells out its full signature inline:
+
+```di
+let mul = |x: I64, y: I64| -> I64 { x * y }
+```
+
 Closures infer rows from their bodies. When stored or passed, the inferred rows appear on the function type.
 
 -----

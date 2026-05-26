@@ -817,6 +817,26 @@ let neg_field_on_non_impl () =
          \    print(x.field)\n\
          }\n")
 
+(* --- Stage 10 negatives ------------------------------------------------- *)
+
+let neg_closure_arity () =
+  check_raises_substr "closure arity" "arity mismatch"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let f = |x, y| x + y\n\
+         \    print(f(1))\n\
+         }\n")
+
+let neg_call_non_function () =
+  check_raises_substr "call non-function" "call of non-function"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let x = 42\n\
+         \    print(x(1))\n\
+         }\n")
+
 let () =
   Alcotest.run "dilang-stages"
     [ "stage1",
@@ -890,6 +910,15 @@ let () =
       ; Alcotest.test_case "09c_predicates"  `Quick (stage_test ~name:"09c_predicates")
       ; Alcotest.test_case "09d_cross_stage" `Quick (stage_test ~name:"09d_cross_stage")
       ]
+    ; "stage10",
+      [ Alcotest.test_case "10_with_retry"           `Quick (stage_test ~name:"10_with_retry")
+      ; Alcotest.test_case "10_capture_provide_exit"  `Quick (stage_test ~name:"10_capture_provide_exit")
+      ; Alcotest.test_case "10_bare_name_value"       `Quick (stage_test ~name:"10_bare_name_value")
+      ; Alcotest.test_case "10_lambda_basic"          `Quick (stage_test ~name:"10_lambda_basic")
+      ; Alcotest.test_case "10_closure_defer"         `Quick (stage_test ~name:"10_closure_defer")
+      ; Alcotest.test_case "10_local_shadows_fn"      `Quick (stage_test ~name:"10_local_shadows_fn")
+      ; Alcotest.test_case "10_fn_value_display"      `Quick (stage_test ~name:"10_fn_value_display")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -948,5 +977,7 @@ let () =
       ; Alcotest.test_case "split_empty_sep"       `Quick neg_split_empty_sep
       ; Alcotest.test_case "unknown_method_string" `Quick neg_unknown_method_string
       ; Alcotest.test_case "cap_shadow"            `Quick neg_cap_shadow
+      ; Alcotest.test_case "closure_arity"         `Quick neg_closure_arity
+      ; Alcotest.test_case "call_non_function"     `Quick neg_call_non_function
       ]
     ]

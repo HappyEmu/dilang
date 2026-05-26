@@ -1,5 +1,5 @@
 
-** Conflict (shift/reduce) in state 21.
+** Conflict (shift/reduce) in state 42.
 ** Tokens involved: LPAREN LBRACE
 ** The following explanations concentrate on token LPAREN.
 ** This state is reached from expr_entry after reading:
@@ -16,7 +16,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 21, looking ahead at LPAREN, reducing production
+** In state 42, looking ahead at LPAREN, reducing production
 ** atom -> IDENT
 ** is permitted because of the following sub-derivation:
 
@@ -25,7 +25,7 @@ expr assign_tail // lookahead token is inherited because assign_tail can vanish
 atom // lookahead token is inherited
 IDENT . 
 
-** In state 21, looking ahead at LPAREN, shifting is permitted
+** In state 42, looking ahead at LPAREN, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -33,8 +33,9 @@ expr assign_tail
 atom 
 IDENT . LPAREN arglist RPAREN 
 
-** Conflict (shift/reduce) in state 29.
-** Token involved: LBRACKET
+** Conflict (shift/reduce) in state 50.
+** Tokens involved: QMARK_DOT LBRACKET DOT
+** The following explanations concentrate on token LBRACKET.
 ** This state is reached from expr_entry after reading:
 
 LBRACE atom
@@ -49,7 +50,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 29, looking ahead at LBRACKET, shifting is permitted
+** In state 50, looking ahead at LBRACKET, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -57,7 +58,7 @@ expr assign_tail
 atom 
 atom . LBRACKET expr RBRACKET 
 
-** In state 29, looking ahead at LBRACKET, reducing production
+** In state 50, looking ahead at LBRACKET, reducing production
 ** expr -> atom
 ** is permitted because of the following sub-derivation:
 
@@ -65,7 +66,7 @@ block_item list(block_item) // lookahead token appears because list(block_item) 
 expr assign_tail // lookahead token is inherited because assign_tail can vanish
 atom . 
 
-** Conflict (shift/reduce) in state 56.
+** Conflict (shift/reduce) in state 77.
 ** Token involved: LPAREN
 ** This state is reached from expr_entry after reading:
 
@@ -81,7 +82,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 56, looking ahead at LPAREN, reducing production
+** In state 77, looking ahead at LPAREN, reducing production
 ** dot_tail ->
 ** is permitted because of the following sub-derivation:
 
@@ -91,7 +92,7 @@ atom // lookahead token is inherited
 atom DOT IDENT dot_tail // lookahead token is inherited
                . 
 
-** In state 56, looking ahead at LPAREN, shifting is permitted
+** In state 77, looking ahead at LPAREN, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -100,8 +101,8 @@ atom
 atom DOT IDENT dot_tail 
                . LPAREN arglist RPAREN 
 
-** Conflict (shift/reduce) in state 197.
-** Tokens involved: TRY STR_INTERP STR PROVIDE LPAREN LOOP LBRACKET LBRACE INT IF IDENT BOOL
+** Conflict (shift/reduce) in state 218.
+** Tokens involved: TRY STR_INTERP STR PROVIDE PIPE LPAREN LOOP LBRACKET LBRACE INT IF IDENT BOOL
 ** The following explanations concentrate on token TRY.
 ** This state is reached from expr_entry after reading:
 
@@ -117,7 +118,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 197, looking ahead at TRY, shifting is permitted
+** In state 218, looking ahead at TRY, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -125,7 +126,7 @@ BREAK break_payload_opt
       atom 
       . TRY expr CATCH LBRACE catch_arms RBRACE 
 
-** In state 197, looking ahead at TRY, reducing production
+** In state 218, looking ahead at TRY, reducing production
 ** break_payload_opt ->
 ** is permitted because of the following sub-derivation:
 
@@ -133,7 +134,7 @@ block_item list(block_item) // lookahead token appears because list(block_item) 
 BREAK break_payload_opt // lookahead token is inherited
       . 
 
-** Conflict (shift/reduce) in state 199.
+** Conflict (shift/reduce) in state 220.
 ** Token involved: LBRACKET
 ** This state is reached from expr_entry after reading:
 
@@ -149,7 +150,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 199, looking ahead at LBRACKET, shifting is permitted
+** In state 220, looking ahead at LBRACKET, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -157,7 +158,7 @@ BREAK break_payload_opt
       atom 
       atom . LBRACKET expr RBRACKET 
 
-** In state 199, looking ahead at LBRACKET, reducing production
+** In state 220, looking ahead at LBRACKET, reducing production
 ** break_payload_opt -> atom
 ** is permitted because of the following sub-derivation:
 
@@ -165,8 +166,38 @@ block_item list(block_item) // lookahead token appears because list(block_item) 
 BREAK break_payload_opt // lookahead token is inherited
       atom . 
 
-** Conflict (shift/reduce) in state 218.
-** Token involved: LBRACKET
+** Conflict (shift/reduce) in state 232.
+** Tokens involved: STAR SLASH QMARK_QMARK PLUS MINUS LT LEQ GT GEQ EQEQ BANGEQ
+** The following explanations concentrate on token STAR.
+** This state is reached from expr_entry after reading:
+
+PIPE lambda_params PIPE expr
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+(?)
+
+** In state 232, looking ahead at STAR, reducing production
+** atom -> PIPE lambda_params PIPE expr
+** is permitted because of the following sub-derivation:
+
+expr STAR expr // lookahead token appears
+atom // lookahead token is inherited
+PIPE lambda_params PIPE expr . 
+
+** In state 232, looking ahead at STAR, shifting is permitted
+** because of the following sub-derivation:
+
+atom 
+PIPE lambda_params PIPE expr 
+                        expr . STAR expr 
+
+** Conflict (shift/reduce) in state 240.
+** Tokens involved: QMARK_DOT LBRACKET DOT
+** The following explanations concentrate on token LBRACKET.
 ** This state is reached from expr_entry after reading:
 
 LBRACE RAISE atom
@@ -181,7 +212,7 @@ block
 LBRACE list(block_item) RBRACE 
        (?)
 
-** In state 218, looking ahead at LBRACKET, shifting is permitted
+** In state 240, looking ahead at LBRACKET, shifting is permitted
 ** because of the following sub-derivation:
 
 block_item list(block_item) 
@@ -189,7 +220,7 @@ expr assign_tail
 RAISE atom 
       atom . LBRACKET expr RBRACKET 
 
-** In state 218, looking ahead at LBRACKET, reducing production
+** In state 240, looking ahead at LBRACKET, reducing production
 ** expr -> RAISE atom
 ** is permitted because of the following sub-derivation:
 

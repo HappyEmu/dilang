@@ -122,6 +122,10 @@ let rec token buf =
   | ':'    -> COLON
   | '@'    -> AT
   | '.'    -> DOT
+  (* Single `|` only — the zero-param lambda `|| { ... }` is two adjacent PIPE
+     tokens (empty param list). A `||` rule would greedily eat both bars via
+     sedlex longest-match and break `|x|`-adjacent-bar cases. *)
+  | '|'    -> PIPE
   | eof    -> EOF
   | _      ->
       let s = Sedlexing.Utf8.lexeme buf in

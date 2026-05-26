@@ -143,3 +143,14 @@ Likely landing: a future typechecker can lift this from a runtime panic to a sta
 
 - Rejected: fan out to one-element-per-character — picks one of several conventions arbitrarily and contradicts the v0 decision to defer all char-level string operations.
 - Rejected: return the whole string as a single element (`["abc"]`) — equally arbitrary, and silently makes a likely-buggy call look successful.
+
+## DEC-017 — Function values display as `<closure>` / `<fn NAME>`
+Status: Active · Cites: syntax §1.2–1.3
+A function value passed to `print()` displays as a fixed marker rather than panicking: `VClosure` → `<closure>`, `VFn f` → `<fn NAME>` (e.g. `<fn foo>`).
+
+Stage 10 introduced first-class function values (lambdas and bare top-level fn names used as values). `print(f)` must produce *something*; panicking on a function value would lose a cheap debugging affordance. The marker is a display convention only — it implies no identity or equality semantics, and deliberately leaks none of the captured environment or capability stack (that would be noisy and a format we'd regret pinning).
+
+Interpreter (Stage 10): the two cases live in `Value.to_display` (`value.ml`); pinned by `test/stages/10_fn_value_display.di` (`<closure>` then `<fn foo>`).
+
+- Rejected: panic on a function value — loses a cheap debugging affordance for no benefit.
+- Rejected: include the captured env/caps in the display — noisy, and a format we'd be stuck supporting.

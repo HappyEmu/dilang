@@ -78,7 +78,13 @@ let rec eval (ctx : ctx) = function
              | None ->
                 (match Hashtbl.find_opt ctx.host_constructors x with
                  | Some ctor -> VImpl (ctor [])
-                 | None      -> failwith ("unbound name: " ^ x)))))
+                 | None      ->
+                   (* Stage 10: a bare top-level fn name used as a value
+                      (`let f = foo`) resolves to a `VFn`. Locals already
+                      shadowed this via the `Env.lookup` above. *)
+                   (match Hashtbl.find_opt ctx.fns x with
+                    | Some f -> VFn f
+                    | None   -> failwith ("unbound name: " ^ x))))))
   | Let { name; mut; rhs; body } ->
       (* Stage 8 (D1): a local `let n = ...` may not shadow a declared
          capability — `MethodCall` routes by checking `ctx.cap_decls`, so a
@@ -101,6 +107,12 @@ let rec eval (ctx : ctx) = function
          fieldless), handled by Var/StructLit. Variant construction also
          flows through here: fns → variants → fail. *)
       let argv = List.map (eval ctx) args in
+      (* Stage 10: a local closure/fn-value bound by `let f = ...` lives in
+         `env` and must win over a same-named top-level fn (env-first
+         dispatch). Fall through to fns → variants otherwise. *)
+      (match Env.find_ref ctx.env name with
+       | Some (r, _) -> call_value ctx !r argv
+       | None ->
       (match Hashtbl.find_opt ctx.fns name with
        | Some f -> call_fn ctx f argv
        | None ->
@@ -113,9 +125,13 @@ let rec eval (ctx : ctx) = function
                     "variant %s expects %d argument(s), got %d"
                     name expected got);
                 VEnum { ty = enum_name; tag = name; payload = argv }
-            | None -> failwith ("unknown function: " ^ name)))
-  | Call _ ->
-      failwith "first-class function calls not supported in Stage 1"
+            | None -> failwith ("unknown function: " ^ name))))
+  | Call { fn; args } ->
+      (* Stage 10: general first-class call — evaluate the callee, dispatch on
+         the resulting value (closure / fn-value). *)
+      let callee = eval ctx fn in
+      let argv = List.map (eval ctx) args in
+      call_value ctx callee argv
   | BinOp (op, a, b) ->
       let va = eval ctx a in
       let vb = eval ctx b in
@@ -340,6 +356,28 @@ let rec eval (ctx : ctx) = function
             with Break_exn _ -> ());
            VUnit
        | _ -> type_err "for over non-array")
+  | Lambda { params; body } ->
+      (* Stage 10: capture the lexical env *and* the capability stack at the
+         point of definition (the load-bearing piece for Stage 11). *)
+      VClosure { params; body; env = ctx.env; caps = ctx.caps }
+
+and call_value (ctx : ctx) callee argv =
+  (* Stage 10: shared first-class invoke. Contrast with `call_fn` (which starts
+     from `Env.empty` and keeps the *caller's* caps): a closure starts from its
+     *captured* env and swaps in its *captured* caps. No defers handling here —
+     the body `Scope` owns them (Option A, DEC-012). *)
+  match callee with
+  | VClosure { params; body; env; caps } ->
+      if List.length params <> List.length argv then failwith "arity mismatch";
+      let env' = List.fold_left2
+        (fun e (p, _) v -> Env.extend e p v ~mut:false) env params argv in
+      let ctx' = { ctx with env = env'; caps } in
+      (try eval ctx' body with
+       | Return_exn v -> v
+       | Break_exn _  -> failwith "break outside any loop"
+       | Continue_exn -> failwith "continue outside any loop")
+  | VFn f -> call_fn ctx f argv
+  | _ -> failwith "call of non-function"
 
 and cap_call ctx cap method_ args =
   (* Stage 8 (D1): extracted from the old `CapCall` arm so `MethodCall` can

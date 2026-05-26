@@ -10,6 +10,15 @@ type value =
      array (both names see the same growth) because the value carries the
      same `ref`. *)
   | VArray of value array ref
+  (* Stage 10: first-class closures. Captures both the lexical `env` *and* the
+     capability stack `caps` at definition time, so a closure built inside a
+     `provide { ... } in { ... }` still resolves its capabilities when invoked
+     after that block has exited. Effect rows are not tracked this stage. *)
+  | VClosure of { params : (Ast.ident * Ast.type_name option) list;
+                  body   : Ast.expr;
+                  env    : env;
+                  caps   : cap_frame list }
+  | VFn of Ast.fn_decl
 
 and impl_value = {
   ty      : Ast.type_name;
@@ -76,3 +85,7 @@ let rec to_display = function
       tag ^ "(" ^ String.concat ", " (List.map to_display payload) ^ ")"
   | VArray a ->
       "[" ^ String.concat ", " (Array.to_list (Array.map to_display !a)) ^ "]"
+  (* DEC-017: function values display as a fixed marker — no captured env/caps
+     leaked, no identity/equality semantics implied. *)
+  | VClosure _ -> "<closure>"
+  | VFn f      -> "<fn " ^ f.name ^ ">"
