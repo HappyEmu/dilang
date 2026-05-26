@@ -780,6 +780,24 @@ let neg_method_on_int () =
          \    print(x.len())\n\
          }\n")
 
+(* --- Stage 9 negatives -------------------------------------------------- *)
+
+let neg_split_empty_sep () =
+  check_raises_substr "split empty sep" "split: separator must be non-empty"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    print(\"abc\".split(\"\").len())\n\
+         }\n")
+
+let neg_unknown_method_string () =
+  check_raises_substr "unknown method on string" "unknown method on string: bogus"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    print(\"abc\".bogus())\n\
+         }\n")
+
 let neg_cap_shadow () =
   check_raises_substr "cap shadow" "collides with a declared capability"
     (fun () ->
@@ -866,6 +884,12 @@ let () =
       ; Alcotest.test_case "08g_for_inside_provide" `Quick (stage_test ~name:"08g_for_inside_provide")
       ; Alcotest.test_case "08h_empty_push"         `Quick (stage_test ~name:"08h_empty_push")
       ]
+    ; "stage9",
+      [ Alcotest.test_case "09_strings"      `Quick (stage_test ~name:"09_strings")
+      ; Alcotest.test_case "09b_split_edges" `Quick (stage_test ~name:"09b_split_edges")
+      ; Alcotest.test_case "09c_predicates"  `Quick (stage_test ~name:"09c_predicates")
+      ; Alcotest.test_case "09d_cross_stage" `Quick (stage_test ~name:"09d_cross_stage")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -921,6 +945,8 @@ let () =
       ; Alcotest.test_case "for_non_array"         `Quick neg_for_non_array
       ; Alcotest.test_case "unknown_method_value"  `Quick neg_unknown_method_value
       ; Alcotest.test_case "method_on_int"         `Quick neg_method_on_int
+      ; Alcotest.test_case "split_empty_sep"       `Quick neg_split_empty_sep
+      ; Alcotest.test_case "unknown_method_string" `Quick neg_unknown_method_string
       ; Alcotest.test_case "cap_shadow"            `Quick neg_cap_shadow
       ]
     ]

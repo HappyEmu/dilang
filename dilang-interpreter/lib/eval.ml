@@ -406,6 +406,35 @@ and value_method_dispatch ctx v name args =
   | VArray _, "len",  _ -> failwith "len() takes no arguments"
   | VArray _, "push", _ -> failwith "push() takes exactly one argument"
   | VArray _, _, _      -> failwith ("unknown method on array: " ^ name)
+  (* Stage 9: strings reuse this same dispatch. No string mutation in v0. *)
+  | VStr s, "len", [] ->
+      VInt (Int64.of_int (String.length s))
+  | VStr s, "trim", [] ->
+      VStr (String.trim s)
+  | VStr s, "contains", [arg] ->
+      (match eval ctx arg with
+       | VStr needle -> VBool (String_util.contains s needle)
+       | _ -> failwith "contains() expects a string argument")
+  | VStr s, "starts_with", [arg] ->
+      (match eval ctx arg with
+       | VStr prefix -> VBool (String.starts_with ~prefix s)
+       | _ -> failwith "starts_with() expects a string argument")
+  | VStr s, "ends_with", [arg] ->
+      (match eval ctx arg with
+       | VStr suffix -> VBool (String.ends_with ~suffix s)
+       | _ -> failwith "ends_with() expects a string argument")
+  | VStr s, "split", [arg] ->
+      (match eval ctx arg with
+       | VStr "" -> failwith "split: separator must be non-empty"
+       | VStr sep ->
+           let pieces = String_util.split_on_substring s sep in
+           VArray (ref (Array.of_list (List.map (fun p -> VStr p) pieces)))
+       | _ -> failwith "split() expects a string argument")
+  | VStr _, "len",  _ -> failwith "len() takes no arguments"
+  | VStr _, "trim", _ -> failwith "trim() takes no arguments"
+  | VStr _, ("contains"|"starts_with"|"ends_with"|"split"), _ ->
+      failwith (name ^ "() takes exactly one argument")
+  | VStr _, _, _ -> failwith ("unknown method on string: " ^ name)
   | _ -> failwith ("method " ^ name ^ " not supported on this value")
 
 and call_fn (ctx : ctx) (f : fn_decl) args =

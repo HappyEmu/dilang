@@ -132,3 +132,14 @@ Likely landing: same as DEC-014 — enforce at the parser/typechecker boundary o
 
 - Rejected for v0: enforce in the interpreter now — see DEC-014; same tracing problem.
 - Rejected: drop the rule — same §2.10 argument as DEC-014.
+
+## DEC-016 — `s.split("")` panics rather than fanning out to characters
+Status: Active · Cites: interpreter.md §"Stage 9 — Strings"
+Splitting a string on the empty separator has no single obvious meaning — `"abc".split("")` could plausibly yield `["a", "b", "c"]`, `["", "a", "b", "c", ""]`, or `["abc"]` depending on the convention. Rather than silently pick one, Stage 9 rejects it at runtime with the specific panic `split: separator must be non-empty`. A clear failure beats a silent surprise, and char-level operations are explicitly deferred in v0 (no `.chars()`, no `s[i]`), so there is no established "characters of a string" surface for empty-split to defer to.
+
+Interpreter (Stage 9): the empty-separator guard precedes the general `VStr sep` arm in `value_method_dispatch` (`eval.ml`), so `s.split("")` produces exactly that message; `String_util.split_on_substring` may therefore assume a non-empty separator. All other splits — including `"".split(sep)` → `[""]` and separators at the boundaries → empty pieces — go through normally. Pinned by `test/run_test.ml`'s `errors/split_empty_sep` case.
+
+Likely landing: a future typechecker can lift this from a runtime panic to a static non-empty-separator precondition. Until then the interpreter is the only enforcement point.
+
+- Rejected: fan out to one-element-per-character — picks one of several conventions arbitrarily and contradicts the v0 decision to defer all char-level string operations.
+- Rejected: return the whole string as a single element (`["abc"]`) — equally arbitrary, and silently makes a likely-buggy call look successful.
