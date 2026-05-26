@@ -20,7 +20,11 @@ type expr =
   | BinOp of bin_op * expr * expr
   | Return of expr
   | StringInterp of string_part list
-  | CapCall of { cap : ident; method_ : ident; args : expr list }
+  (* Stage 8 (D1): unified dotted-call form. Eval routes to capability dispatch
+     when `target = Var n` and `n` is a declared capability; otherwise it
+     dispatches by the runtime type of the evaluated target (`VArray.len`,
+     `VArray.push`, future `VStr.*`). *)
+  | MethodCall   of { target : expr; name : ident; args : expr list }
   | Provide of { entries : provide_entry list; scope : ident option; body : expr option }
   | FieldGet of { recv : expr; name : ident }
   | StructLit of { ty : type_name; fields : (ident * expr) list }
@@ -38,10 +42,14 @@ type expr =
   | Scope        of expr
   | Assign       of { name : ident; rhs : expr }
   | AssignField  of { recv : expr; name : ident; rhs : expr }
+  | AssignIndex  of { target : expr; idx : expr; rhs : expr }
   | Loop         of expr
   | While        of { cond : expr; body : expr }
+  | For          of { var : ident; iter : expr; body : expr }
   | Break        of expr option
   | Continue
+  | ArrayLit     of expr list
+  | Index        of { target : expr; idx : expr }
 
 and string_part =
   | SLit of string

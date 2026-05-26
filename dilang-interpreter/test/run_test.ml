@@ -440,6 +440,47 @@ let stress_loop_string_accumulator () =
   Buffer.add_char expected '\n';
   Alcotest.(check string) "loop accumulator" (Buffer.contents expected) out
 
+(* --- Stage 8 stress: arrays + iteration --------------------------------- *)
+
+let stress_array_push_1k () =
+  (* Push 1000 ints into an array, then read length + a few indices. *)
+  let n = 1000 in
+  let src = Printf.sprintf
+    "fn main() {\n\
+    \    let xs = []\n\
+    \    let mut i = 0\n\
+    \    while i < %d {\n\
+    \        xs.push(i)\n\
+    \        i = i + 1\n\
+    \    }\n\
+    \    print(xs.len())\n\
+    \    print(xs[0])\n\
+    \    print(xs[999])\n\
+    }\n" n
+  in
+  let out = run_string src in
+  Alcotest.(check string) "1k push" "1000\n0\n999\n" out
+
+let stress_for_10k () =
+  (* Build a 10k-element array and sum it with `for`. *)
+  let n = 10_000 in
+  let src = Printf.sprintf
+    "fn main() {\n\
+    \    let xs = []\n\
+    \    let mut i = 0\n\
+    \    while i < %d {\n\
+    \        xs.push(i)\n\
+    \        i = i + 1\n\
+    \    }\n\
+    \    let mut sum = 0\n\
+    \    for x in xs { sum = sum + x }\n\
+    \    print(sum)\n\
+    }\n" n
+  in
+  let out = run_string src in
+  let expected_sum = n * (n - 1) / 2 in
+  Alcotest.(check string) "10k for" (string_of_int expected_sum ^ "\n") out
+
 let stress_interpolation () =
   let n = 200 in
   let b = Buffer.create (40 * n) in
@@ -693,6 +734,62 @@ let neg_while_cond_not_bool () =
          \    while 1 { print(\"x\") }\n\
          }\n")
 
+(* --- Stage 8 negatives -------------------------------------------------- *)
+
+let neg_index_oob () =
+  check_raises_substr "index oob" "index out of bounds"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let xs = [1, 2, 3]\n\
+         \    print(xs[5])\n\
+         }\n")
+
+let neg_index_non_array () =
+  check_raises_substr "index non-array" "indexing non-array"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let x = 42\n\
+         \    print(x[0])\n\
+         }\n")
+
+let neg_for_non_array () =
+  check_raises_substr "for non-array" "for over non-array"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    for n in 42 { print(n) }\n\
+         }\n")
+
+let neg_unknown_method_value () =
+  check_raises_substr "unknown method on array" "unknown method on array: bogus"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let xs = [1, 2, 3]\n\
+         \    xs.bogus()\n\
+         }\n")
+
+let neg_method_on_int () =
+  check_raises_substr "method on int" "method len not supported"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    let x = 42\n\
+         \    print(x.len())\n\
+         }\n")
+
+let neg_cap_shadow () =
+  check_raises_substr "cap shadow" "collides with a declared capability"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         fn main() {\n\
+         \    let Logger = 42\n\
+         \    print(Logger)\n\
+         }\n")
+
 let neg_field_on_non_impl () =
   check_raises_substr "field on non-impl" "field access on non-impl value"
     (fun () ->
@@ -759,6 +856,16 @@ let () =
       ; Alcotest.test_case "07i_mutate_field"         `Quick (stage_test ~name:"07i_mutate_field")
       ; Alcotest.test_case "07j_mutate_self_field"    `Quick (stage_test ~name:"07j_mutate_self_field")
       ]
+    ; "stage8",
+      [ Alcotest.test_case "08_arrays"              `Quick (stage_test ~name:"08_arrays")
+      ; Alcotest.test_case "08b_for_break"          `Quick (stage_test ~name:"08b_for_break")
+      ; Alcotest.test_case "08c_for_continue"       `Quick (stage_test ~name:"08c_for_continue")
+      ; Alcotest.test_case "08d_for_defer"          `Quick (stage_test ~name:"08d_for_defer")
+      ; Alcotest.test_case "08e_index_assign"       `Quick (stage_test ~name:"08e_index_assign")
+      ; Alcotest.test_case "08f_method_chain"       `Quick (stage_test ~name:"08f_method_chain")
+      ; Alcotest.test_case "08g_for_inside_provide" `Quick (stage_test ~name:"08g_for_inside_provide")
+      ; Alcotest.test_case "08h_empty_push"         `Quick (stage_test ~name:"08h_empty_push")
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -780,6 +887,8 @@ let () =
       ; Alcotest.test_case "nested_loops_in_fns_50" `Quick stress_50_nested_loops_in_fns
       ; Alcotest.test_case "loop_defers_100"        `Quick stress_loop_defers_100
       ; Alcotest.test_case "loop_string_accumulator" `Quick stress_loop_string_accumulator
+      ; Alcotest.test_case "array_push_1k"            `Quick stress_array_push_1k
+      ; Alcotest.test_case "for_10k"                  `Quick stress_for_10k
       ]
     ; "errors",
       [ Alcotest.test_case "cap_not_in_scope"    `Quick neg_cap_not_in_scope
@@ -807,5 +916,11 @@ let () =
       ; Alcotest.test_case "break_outside_loop"    `Quick neg_break_outside_loop
       ; Alcotest.test_case "continue_outside_loop" `Quick neg_continue_outside_loop
       ; Alcotest.test_case "while_cond_not_bool"   `Quick neg_while_cond_not_bool
+      ; Alcotest.test_case "index_oob"             `Quick neg_index_oob
+      ; Alcotest.test_case "index_non_array"       `Quick neg_index_non_array
+      ; Alcotest.test_case "for_non_array"         `Quick neg_for_non_array
+      ; Alcotest.test_case "unknown_method_value"  `Quick neg_unknown_method_value
+      ; Alcotest.test_case "method_on_int"         `Quick neg_method_on_int
+      ; Alcotest.test_case "cap_shadow"            `Quick neg_cap_shadow
       ]
     ]

@@ -433,6 +433,46 @@ A capability annotated `@ Request` may only be bound inside `provide @ Request {
 
 -----
 
+## Arrays
+
+`[T]` is the built-in growable array type. Literals use square brackets; the empty literal `[]` infers its element type from context.
+
+```di
+let nums    = [3, 1, 4, 1, 5, 9, 2, 6]
+let empty   = []                          // element type inferred at use site
+```
+
+Indexed read returns `T`; out-of-bounds reads panic in v0. Indexed assignment writes through an existing slot.
+
+```di
+let xs = [10, 20, 30]
+print(xs[0])                              // 10
+xs[2] = 99
+print(xs[2])                              // 99
+```
+
+Method dispatch on arrays (value-method form, distinct from capability dispatch):
+
+```di
+let xs = [1, 2, 3]
+print(xs.len())                           // 3
+xs.push(4)
+print(xs[3])                              // 4
+```
+
+Iteration uses `for x in xs { ... }`. The loop var is immutable per iteration; `break` and `continue` work the same as in `while`. Per DEC-013 `for` is a statement, not an expression — it always evaluates to `()`. Mutating `xs[i] = v` and `xs.push(v)` work in v0 even when `xs` is bound with plain `let`; DEC-015 will eventually require `let mut`.
+
+When the iter expression is a bare name, the closing `{` belongs to the loop body — no struct literal is parsed in the head position:
+
+```di
+for n in nums { ... }                      // `nums` is the iter; `{ ... }` is the body
+for n in (Source { seed: 0 }) { ... }      // struct lits in the head must be parenthesised
+```
+
+The same restriction applies to the head of `if` and `while`.
+
+-----
+
 ## 10. Streams and iteration
 
 ### 10.1 Stream construction

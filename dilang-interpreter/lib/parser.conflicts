@@ -1,0 +1,198 @@
+
+** Conflict (shift/reduce) in state 21.
+** Tokens involved: LPAREN LBRACE
+** The following explanations concentrate on token LPAREN.
+** This state is reached from expr_entry after reading:
+
+LBRACE IDENT
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 21, looking ahead at LPAREN, reducing production
+** atom -> IDENT
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with LPAREN
+expr assign_tail // lookahead token is inherited because assign_tail can vanish
+atom // lookahead token is inherited
+IDENT . 
+
+** In state 21, looking ahead at LPAREN, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+expr assign_tail 
+atom 
+IDENT . LPAREN arglist RPAREN 
+
+** Conflict (shift/reduce) in state 29.
+** Token involved: LBRACKET
+** This state is reached from expr_entry after reading:
+
+LBRACE atom
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 29, looking ahead at LBRACKET, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+expr assign_tail 
+atom 
+atom . LBRACKET expr RBRACKET 
+
+** In state 29, looking ahead at LBRACKET, reducing production
+** expr -> atom
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with LBRACKET
+expr assign_tail // lookahead token is inherited because assign_tail can vanish
+atom . 
+
+** Conflict (shift/reduce) in state 56.
+** Token involved: LPAREN
+** This state is reached from expr_entry after reading:
+
+LBRACE atom DOT IDENT
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 56, looking ahead at LPAREN, reducing production
+** dot_tail ->
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with LPAREN
+expr assign_tail // lookahead token is inherited because assign_tail can vanish
+atom // lookahead token is inherited
+atom DOT IDENT dot_tail // lookahead token is inherited
+               . 
+
+** In state 56, looking ahead at LPAREN, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+expr assign_tail 
+atom 
+atom DOT IDENT dot_tail 
+               . LPAREN arglist RPAREN 
+
+** Conflict (shift/reduce) in state 197.
+** Tokens involved: TRY STR_INTERP STR PROVIDE LPAREN LOOP LBRACKET LBRACE INT IF IDENT BOOL
+** The following explanations concentrate on token TRY.
+** This state is reached from expr_entry after reading:
+
+LBRACE BREAK
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 197, looking ahead at TRY, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+BREAK break_payload_opt 
+      atom 
+      . TRY expr CATCH LBRACE catch_arms RBRACE 
+
+** In state 197, looking ahead at TRY, reducing production
+** break_payload_opt ->
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with TRY
+BREAK break_payload_opt // lookahead token is inherited
+      . 
+
+** Conflict (shift/reduce) in state 199.
+** Token involved: LBRACKET
+** This state is reached from expr_entry after reading:
+
+LBRACE BREAK atom
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 199, looking ahead at LBRACKET, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+BREAK break_payload_opt 
+      atom 
+      atom . LBRACKET expr RBRACKET 
+
+** In state 199, looking ahead at LBRACKET, reducing production
+** break_payload_opt -> atom
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with LBRACKET
+BREAK break_payload_opt // lookahead token is inherited
+      atom . 
+
+** Conflict (shift/reduce) in state 218.
+** Token involved: LBRACKET
+** This state is reached from expr_entry after reading:
+
+LBRACE RAISE atom
+
+** The derivations that appear below have the following common factor:
+** (The question mark symbol (?) represents the spot where the derivations begin to differ.)
+
+expr_entry 
+expr EOF 
+atom 
+block 
+LBRACE list(block_item) RBRACE 
+       (?)
+
+** In state 218, looking ahead at LBRACKET, shifting is permitted
+** because of the following sub-derivation:
+
+block_item list(block_item) 
+expr assign_tail 
+RAISE atom 
+      atom . LBRACKET expr RBRACKET 
+
+** In state 218, looking ahead at LBRACKET, reducing production
+** expr -> RAISE atom
+** is permitted because of the following sub-derivation:
+
+block_item list(block_item) // lookahead token appears because list(block_item) can begin with LBRACKET
+expr assign_tail // lookahead token is inherited because assign_tail can vanish
+RAISE atom . 

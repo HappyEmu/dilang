@@ -1,0 +1,8 @@
+fn main() {
+    let xs = [1, 2, 3, 4, 5]
+    for x in xs {
+        if x > 3 { break }
+        print(x)
+    }
+    print("after")
+}

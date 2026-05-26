@@ -5,6 +5,11 @@ type value =
   | VStr  of string
   | VImpl of impl_value
   | VEnum of { ty : Ast.type_name; tag : string; payload : value list }
+  (* Stage 8. Mutable in place; `xs.push(v)` reallocates via Array.append and
+     swaps the ref. Sharing semantics: assigning `let ys = xs` aliases the
+     array (both names see the same growth) because the value carries the
+     same `ref`. *)
+  | VArray of value array ref
 
 and impl_value = {
   ty      : Ast.type_name;
@@ -69,3 +74,5 @@ let rec to_display = function
   | VEnum { tag; payload = []; _ } -> tag
   | VEnum { tag; payload; _ } ->
       tag ^ "(" ^ String.concat ", " (List.map to_display payload) ^ ")"
+  | VArray a ->
+      "[" ^ String.concat ", " (Array.to_list (Array.map to_display !a)) ^ "]"

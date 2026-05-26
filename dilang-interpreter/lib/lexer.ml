@@ -116,6 +116,8 @@ let rec token buf =
   | ')'    -> RPAREN
   | '{'    -> LBRACE
   | '}'    -> RBRACE
+  | '['    -> LBRACKET
+  | ']'    -> RBRACKET
   | ','    -> COMMA
   | ':'    -> COLON
   | '@'    -> AT

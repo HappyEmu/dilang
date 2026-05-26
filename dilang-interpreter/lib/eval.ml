@@ -80,6 +80,12 @@ let rec eval (ctx : ctx) = function
                  | Some ctor -> VImpl (ctor [])
                  | None      -> failwith ("unbound name: " ^ x)))))
   | Let { name; mut; rhs; body } ->
+      (* Stage 8 (D1): a local `let n = ...` may not shadow a declared
+         capability — `MethodCall` routes by checking `ctx.cap_decls`, so a
+         shadow would silently flip method calls from capability dispatch to
+         value-method dispatch. Reject early with a clean error. *)
+      if Hashtbl.mem ctx.cap_decls name then
+        failwith ("`" ^ name ^ "` collides with a declared capability");
       let v = eval ctx rhs in
       let env' = Env.extend ctx.env name v ~mut in
       eval { ctx with env = env' } body
@@ -215,57 +221,16 @@ let rec eval (ctx : ctx) = function
       eval { ctx with caps = frame :: ctx.caps } b
   | Provide { body = None; _ } ->
       failwith "Wiring values (provide without `in`) are not supported in Stage 4 (Stage 9)"
-  | CapCall { cap; method_; args } ->
-      (* Walk frames innermost-first; within each frame scan bindings in
-         reverse declaration order ("later wins" per syntax §7.1 / DEC-002).
-         Accept the first binding whose declared cap C' has ext_of[C'] ∋ cap. *)
-      let find_in_frame (f : cap_frame) =
-        let rec scan = function
-          | [] -> None
-          | (c', iv) :: rest ->
-              let exts =
-                try Hashtbl.find ctx.ext_of c' with Not_found -> [c']
-              in
-              if List.mem cap exts then Some iv else scan rest
-        in
-        scan (List.rev f.bindings)
-      in
-      let rec walk = function
-        | [] -> failwith ("capability " ^ cap ^ " not in scope")
-        | f :: rest ->
-            (match find_in_frame f with
-             | Some iv -> iv
-             | None    -> walk rest)
-      in
-      let impl = walk ctx.caps in
-      let arg_vs = List.map (eval ctx) args in
-      (match List.assoc_opt method_ impl.methods with
-       | None              -> failwith ("capability " ^ cap ^ " has no method " ^ method_)
-       | Some (DHost f)    -> f ctx arg_vs
-       | Some (DUser m) ->
-           if List.length m.im_params <> List.length arg_vs then
-             failwith ("arity mismatch calling " ^ cap ^ "." ^ method_);
-           let env0 =
-             List.fold_left2
-               (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
-               Env.empty m.im_params arg_vs
-           in
-           let env_with_self =
-             if impl.fields = [] then env0
-             else Env.extend env0 "self" (VImpl impl) ~mut:false
-           in
-           let activation_ctx =
-             { ctx with env = env_with_self; caps = impl.cap_env }
-           in
-           (* Same as `call_fn`: defers belong to the method body's `Scope`
-              (DEC-012); this arm only owns the `Return_exn` catch. Stage 7
-              adds catches for `Break_exn` / `Continue_exn` that leaked past
-              the innermost loop — convert to a runtime error. *)
-           try eval activation_ctx m.im_body
-           with
-           | Return_exn v -> v
-           | Break_exn _  -> failwith "break outside any loop"
-           | Continue_exn -> failwith "continue outside any loop")
+  | MethodCall { target; name; args } ->
+      (* Stage 8 (D1): one parser node, two eval paths. If the target is a
+         bare name of a declared capability, route to capability dispatch;
+         otherwise evaluate the target and dispatch by its runtime type. *)
+      (match target with
+       | Var n when Hashtbl.mem ctx.cap_decls n ->
+           cap_call ctx n name args
+       | _ ->
+           let v = eval ctx target in
+           value_method_dispatch ctx v name args)
   | StructLit { ty; fields } ->
       let evaluated = List.map (fun (n, e) -> (n, eval ctx e)) fields in
       let ctor =
@@ -333,6 +298,115 @@ let rec eval (ctx : ctx) = function
       raise (Break_exn v)
   | Continue ->
       raise Continue_exn
+  | ArrayLit es ->
+      VArray (ref (Array.of_list (List.map (eval ctx) es)))
+  | Index { target; idx } ->
+      (match eval ctx target, eval ctx idx with
+       | VArray a, VInt i ->
+           let i = Int64.to_int i in
+           if i < 0 || i >= Array.length !a then
+             failwith ("index out of bounds: " ^ string_of_int i);
+           (!a).(i)
+       | VArray _, _ -> type_err "array index not I64"
+       | _ -> type_err "indexing non-array")
+  | AssignIndex { target; idx; rhs } ->
+      (* DEC-015 (Deferred): mutation through an indexed assignment should
+         eventually require the receiver's root binding to be `mut` (matches
+         DEC-014's rule for fields). v0 does not enforce this — `let xs =
+         [...]; xs[0] = 1` runs successfully. Programs that rely on this
+         will need a `let mut` added under the stricter rule. *)
+      (match eval ctx target, eval ctx idx with
+       | VArray a, VInt i ->
+           let i = Int64.to_int i in
+           if i < 0 || i >= Array.length !a then
+             failwith ("index out of bounds: " ^ string_of_int i);
+           (!a).(i) <- eval ctx rhs;
+           VUnit
+       | VArray _, _ -> type_err "array index not I64"
+       | _ -> type_err "indexed assignment on non-array")
+  | For { var; iter; body } ->
+      (* Stage 8 (D2): statement-only (parallels `While`), yields `VUnit`
+         (DEC-013). Catches `Break_exn` outside the loop and `Continue_exn`
+         per-iteration — same shape as `While`/`Loop`. Per-iteration `Scope`
+         in the body owns its defers (DEC-012). *)
+      (match eval ctx iter with
+       | VArray a ->
+           (try
+              Array.iter (fun v ->
+                let env' = Env.extend ctx.env var v ~mut:false in
+                try ignore (eval { ctx with env = env' } body)
+                with Continue_exn -> ()
+              ) !a
+            with Break_exn _ -> ());
+           VUnit
+       | _ -> type_err "for over non-array")
+
+and cap_call ctx cap method_ args =
+  (* Stage 8 (D1): extracted from the old `CapCall` arm so `MethodCall` can
+     route to it. Walks frames innermost-first; within each frame scans
+     bindings in reverse declaration order ("later wins" per syntax §7.1 /
+     DEC-002). Accepts the first binding whose declared cap C' has
+     ext_of[C'] ∋ cap. *)
+  let find_in_frame (f : cap_frame) =
+    let rec scan = function
+      | [] -> None
+      | (c', iv) :: rest ->
+          let exts =
+            try Hashtbl.find ctx.ext_of c' with Not_found -> [c']
+          in
+          if List.mem cap exts then Some iv else scan rest
+    in
+    scan (List.rev f.bindings)
+  in
+  let rec walk = function
+    | [] -> failwith ("capability " ^ cap ^ " not in scope")
+    | f :: rest ->
+        (match find_in_frame f with
+         | Some iv -> iv
+         | None    -> walk rest)
+  in
+  let impl = walk ctx.caps in
+  let arg_vs = List.map (eval ctx) args in
+  (match List.assoc_opt method_ impl.methods with
+   | None              -> failwith ("capability " ^ cap ^ " has no method " ^ method_)
+   | Some (DHost f)    -> f ctx arg_vs
+   | Some (DUser m) ->
+       if List.length m.im_params <> List.length arg_vs then
+         failwith ("arity mismatch calling " ^ cap ^ "." ^ method_);
+       let env0 =
+         List.fold_left2
+           (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
+           Env.empty m.im_params arg_vs
+       in
+       let env_with_self =
+         if impl.fields = [] then env0
+         else Env.extend env0 "self" (VImpl impl) ~mut:false
+       in
+       let activation_ctx =
+         { ctx with env = env_with_self; caps = impl.cap_env }
+       in
+       try eval activation_ctx m.im_body
+       with
+       | Return_exn v -> v
+       | Break_exn _  -> failwith "break outside any loop"
+       | Continue_exn -> failwith "continue outside any loop")
+
+and value_method_dispatch ctx v name args =
+  (* Stage 8 (D1): runtime-type-driven method dispatch. Stage 9 will slot
+     `VStr` arms into the same shape; later stages add streams etc. Errors
+     stay specific so the test suite can pin them. *)
+  match v, name, args with
+  | VArray a, "len", [] ->
+      VInt (Int64.of_int (Array.length !a))
+  | VArray a, "push", [arg] ->
+      (* DEC-015 (Deferred): no `mut` requirement on the receiver root in
+         v0; `let xs = []; xs.push(1)` runs. *)
+      a := Array.append !a [| eval ctx arg |];
+      VUnit
+  | VArray _, "len",  _ -> failwith "len() takes no arguments"
+  | VArray _, "push", _ -> failwith "push() takes exactly one argument"
+  | VArray _, _, _      -> failwith ("unknown method on array: " ^ name)
+  | _ -> failwith ("method " ^ name ^ " not supported on this value")
 
 and call_fn (ctx : ctx) (f : fn_decl) args =
   if List.length f.params <> List.length args then

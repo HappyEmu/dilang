@@ -121,3 +121,14 @@ Likely landing: enforce at the parser/typechecker boundary once we have a flow-s
 
 - Rejected for v0: enforce in the interpreter now — needs receiver-root tracing through arbitrary expr chains (`a.b.c.d = …`), which is doable but easier with the typechecker's plumbing in place.
 - Rejected: drop the rule (allow field mutation on any binding) — contradicts §2.10's "optimize for review: mutation is visible at the binding site." A reader who sees `let s = …` should be entitled to assume nothing downstream mutates state reachable through `s`.
+
+## DEC-015 — Indexed/method mutation requires `mut` on the receiver root (Deferred)
+Status: Deferred (v0 interpreter behavior noted) · Cites: design §2.1, §2.10, syntax §1
+Companion to DEC-014. The eventual rule: `xs[i] = rhs` and mutating value-method calls (`xs.push(v)`) are legal only when `xs` was bound `let mut` (or the chain's root binding is `mut`). A reader who sees `let xs = …` should be entitled to assume nothing downstream grows or rewrites the array reachable through `xs` — same review-time argument as DEC-014.
+
+Interpreter v0 (Stage 8): **not enforced.** `AssignIndex` writes directly through the `VArray` ref produced by `ArrayLit`, and `VArray.push` mutates the underlying ref regardless of the receiver's `mut` flag. So `let xs = [1, 2, 3]; xs[0] = 99` and `let xs = []; xs.push(1)` both run successfully. Documented at the `AssignIndex` arm and the `VArray, "push"` arm in `eval.ml`, and at the call sites in `test/stages/08e_index_assign.di` / `test/stages/08h_empty_push.di`.
+
+Likely landing: same as DEC-014 — enforce at the parser/typechecker boundary once we have flow-sensitive receiver-root tracing. Programs that rely on this leniency will need a `mut` added.
+
+- Rejected for v0: enforce in the interpreter now — see DEC-014; same tracing problem.
+- Rejected: drop the rule — same §2.10 argument as DEC-014.

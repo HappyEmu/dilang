@@ -15,6 +15,7 @@ open Ast
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
 %token LPAREN RPAREN LBRACE RBRACE
+%token LBRACKET RBRACKET
 %token COMMA COLON ARROW AT DOT
 %token QMARK QMARK_QMARK QMARK_DOT
 %token EOF
@@ -136,14 +137,21 @@ block:
 
 block_item:
   | LET; m = mut_opt; n = IDENT; EQ; e = expr       { BLet { name = n; mut = m; rhs = e } }
-  | WHILE; c = expr; b = block                      { BExpr (While { cond = c; body = b }) }
+  | WHILE; c = head_expr; b = block                 { BExpr (While { cond = c; body = b }) }
+  (* Stage 8 (D2): `for` is statement-only, parallels `while`. Loop var is
+     bound `~mut:false` per iteration. DEC-013: yields `VUnit`. The iter
+     uses `head_expr` (no toplevel `IDENT { ... }` struct-lit form), so
+     `for n in nums { ... }` parses with `nums` as a bare `Var`. *)
+  | FOR; n = IDENT; IN; e = head_expr; b = block
+      { BExpr (For { var = n; iter = e; body = b }) }
   | BREAK; p = break_payload_opt                    { BExpr (Break p) }
   | CONTINUE                                        { BExpr Continue }
   (* Assignment piggybacks on `expr` so we don't have to redeclare every
      IDENT-prefixed atom production. The semantic action pattern-matches the
-     LHS: bare `Var` → `Assign`, `FieldGet` → `AssignField`; anything else is
-     a parse-time error. EQ cannot occur inside `expr`, so the optional tail
-     does not add new conflicts. *)
+     LHS: bare `Var` → `Assign`, `FieldGet` → `AssignField`, `Index` →
+     `AssignIndex` (Stage 8); anything else is a parse-time error. EQ
+     cannot occur inside `expr`, so the optional tail does not add new
+     conflicts. *)
   | lhs = expr; t = assign_tail
       { match t with
         | None     -> BExpr lhs
@@ -152,9 +160,11 @@ block_item:
              | Var n -> BExpr (Assign { name = n; rhs })
              | FieldGet { recv; name } ->
                  BExpr (AssignField { recv; name; rhs })
+             | Index { target; idx } ->
+                 BExpr (AssignIndex { target; idx; rhs })
              | _ ->
                  failwith
-                   "left-hand side of `=` must be `name` or `expr.field`") }
+                   "left-hand side of `=` must be `name`, `expr.field`, or `expr[i]`") }
 
 assign_tail:
   |               { None }
@@ -203,17 +213,26 @@ atom:
   | parts = STR_INTERP                                   { StringInterp parts }
   | b = BOOL                                             { Lit (LBool b) }
   | a = atom; QMARK_DOT; m = IDENT                       { OptChain { recv = a; name = m } }
-  | n = IDENT; DOT; m = IDENT; t = dot_tail
+  (* Stage 8 (D1): unify dotted-call into a single arbitrary-atom form.
+     Eval routes capability vs value-method dispatch — see [[dec-001]] and
+     the `MethodCall` arm in eval.ml. `dot_tail` distinguishes a method call
+     (`Some args`) from a plain field access (`None`). *)
+  | a = atom; DOT; m = IDENT; t = dot_tail
       { match t with
-        | None      -> FieldGet { recv = Var n; name = m }
-        | Some args -> CapCall { cap = n; method_ = m; args } }
+        | None      -> FieldGet { recv = a; name = m }
+        | Some args -> MethodCall { target = a; name = m; args } }
   | n = IDENT; LBRACE; fs = struct_lit_fields; RBRACE
       { StructLit { ty = n; fields = fs } }
   | n = IDENT                                            { Var n }
   | n = IDENT; LPAREN; args = arglist; RPAREN            { Call { fn = Var n; args } }
+  (* Stage 8: `[a, b, c]` array literal and `a[i]` indexed read. The
+     `atom LBRACKET` form is left-recursive; default shift on LBRACKET wins,
+     resolving `[1,2,3][0]` and `xs[0][1]` correctly. *)
+  | LBRACKET; xs = arglist; RBRACKET                     { ArrayLit xs }
+  | a = atom; LBRACKET; i = expr; RBRACKET               { Index { target = a; idx = i } }
   | LPAREN; e = expr; RPAREN                             { e }
   | b = block                                            { b }
-  | IF; c = expr; t = block; e = else_opt                { If { cond = c; then_ = t; else_ = e } }
+  | IF; c = head_expr; t = block; e = else_opt           { If { cond = c; then_ = t; else_ = e } }
   (* DEC-013: `loop` is an expression yielding `break v`'s payload (VUnit if
      `break;` carries nothing). `while` lives at block_item only. *)
   | LOOP; b = block                                       { Loop b }
@@ -223,13 +242,62 @@ atom:
   | PROVIDE; LBRACE; es = provide_entries; RBRACE; IN; b = block
     { Provide { entries = es; scope = None; body = Some b } }
 
+(* Stage 8: Rust-style restricted expression — used in the head position of
+   `if` / `while` / `for ... in` (and `else if`) where a trailing `LBRACE`
+   must be the body of the construct, not the start of a struct literal.
+   `head_atom` mirrors `atom` but drops the `IDENT LBRACE fields RBRACE`
+   form; `head_expr` mirrors `expr` but uses `head_atom` recursively.
+   StructLit is still reachable inside parens: `for n in (S { x: 1 }) { ... }`. *)
+head_expr:
+  | RETURN; e = expr                  { Return e }
+  | DEFER;  e = expr                  { Defer e }
+  | RAISE; e = atom
+      { match e with
+        | Var v -> Raise { variant = v; payload = [] }
+        | Call { fn = Var v; args } -> Raise { variant = v; payload = args }
+        | _ -> failwith "raise expects a variant: `raise X` or `raise X(args)`" }
+  | l = head_expr; QMARK_QMARK; r = head_expr { NullCoalesce (l, r) }
+  | l = head_expr; PLUS;   r = head_expr   { BinOp (Add, l, r) }
+  | l = head_expr; MINUS;  r = head_expr   { BinOp (Sub, l, r) }
+  | l = head_expr; STAR;   r = head_expr   { BinOp (Mul, l, r) }
+  | l = head_expr; SLASH;  r = head_expr   { BinOp (Div, l, r) }
+  | l = head_expr; EQEQ;   r = head_expr   { BinOp (Eq,  l, r) }
+  | l = head_expr; BANGEQ; r = head_expr   { BinOp (Neq, l, r) }
+  | l = head_expr; LT;     r = head_expr   { BinOp (Lt,  l, r) }
+  | l = head_expr; GT;     r = head_expr   { BinOp (Gt,  l, r) }
+  | l = head_expr; LEQ;    r = head_expr   { BinOp (Leq, l, r) }
+  | l = head_expr; GEQ;    r = head_expr   { BinOp (Geq, l, r) }
+  | a = head_atom                     { a }
+
+head_atom:
+  | i = INT                                                  { Lit (LInt i) }
+  | s = STR                                                  { Lit (LStr s) }
+  | parts = STR_INTERP                                       { StringInterp parts }
+  | b = BOOL                                                 { Lit (LBool b) }
+  | a = head_atom; QMARK_DOT; m = IDENT                      { OptChain { recv = a; name = m } }
+  | a = head_atom; DOT; m = IDENT; t = dot_tail
+      { match t with
+        | None      -> FieldGet { recv = a; name = m }
+        | Some args -> MethodCall { target = a; name = m; args } }
+  | n = IDENT                                                { Var n }
+  | n = IDENT; LPAREN; args = arglist; RPAREN                { Call { fn = Var n; args } }
+  | LBRACKET; xs = arglist; RBRACKET                         { ArrayLit xs }
+  | a = head_atom; LBRACKET; i = expr; RBRACKET              { Index { target = a; idx = i } }
+  | LPAREN; e = expr; RPAREN                                 { e }
+  | b = block                                                { b }
+  | IF; c = head_expr; t = block; e = else_opt               { If { cond = c; then_ = t; else_ = e } }
+  | LOOP; b = block                                          { Loop b }
+  | TRY; b = expr; CATCH; LBRACE; arms = catch_arms; RBRACE  { Try { body = b; arms } }
+  | PROVIDE; LBRACE; es = provide_entries; RBRACE; IN; b = block
+    { Provide { entries = es; scope = None; body = Some b } }
+
 else_opt:
   |                                                       { None }
   | ELSE; b = block                                       { Some b }
   | ELSE; e = if_expr                                     { Some e }
 
 if_expr:
-  | IF; c = expr; t = block; e = else_opt                 { If { cond = c; then_ = t; else_ = e } }
+  | IF; c = head_expr; t = block; e = else_opt            { If { cond = c; then_ = t; else_ = e } }
 
 catch_arms:
   |                                                       { [] }
