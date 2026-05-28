@@ -12,10 +12,10 @@ impl Stamper for Combo {
 }
 
 fn main() {
-    provide {
-        Stamper = Combo @ Process
-        Logger  = Combo @ Process
-    } in {
+    with [
+        Stamper <- Combo @ 'Process
+        Logger  <- Combo @ 'Process
+    ] @ 'Process {
         Logger.info(Stamper.stamp("hi"))
     }
 }

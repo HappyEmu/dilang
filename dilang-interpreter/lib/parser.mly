@@ -7,13 +7,15 @@ open Ast
 %token <Ast.string_part list> STR_INTERP
 %token <bool>   BOOL
 %token <string> IDENT
+%token <string> LIFETIME
 %token FN LET MUT RETURN
-%token CAPABILITY PROVIDE REQUIRES RAISES IN
+%token CAPABILITY WITH SCOPE UNDER REQUIRES RAISES IN
 %token STRUCT IMPL FOR EXTENDS
 %token IF ELSE ENUM RAISE TRY CATCH DEFER
 %token LOOP WHILE BREAK CONTINUE
 %token PLUS MINUS STAR SLASH
 %token EQ EQEQ BANGEQ LT GT LEQ GEQ
+%token LARROW ELLIPSIS
 %token LPAREN RPAREN LBRACE RBRACE
 %token LBRACKET RBRACKET
 %token COMMA COLON ARROW AT DOT
@@ -42,8 +44,13 @@ decl:
   | FN; n = IDENT; LPAREN; ps = params; RPAREN;
     r = ret_opt; raises_opt; req = requires_opt; b = block
     { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
-  | CAPABILITY; n = IDENT; ext = extends_opt; LBRACE; ms = list(cap_method); RBRACE
-    { DCap { c_name = n; c_extends = ext; c_methods = ms } }
+  | FN; n = IDENT; LPAREN; ps = params; RPAREN;
+    r = ret_opt; raises_opt; req = requires_opt; EQ; b = expr
+    { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
+  | CAPABILITY; n = IDENT; sc = cap_scope_opt; ext = extends_opt; LBRACE; ms = list(cap_method); RBRACE
+    { DCap { c_name = n; c_scope = sc; c_extends = ext; c_methods = ms } }
+  | SCOPE; n = lifetime; p = scope_parent_opt
+    { DScope { sc_name = n; sc_parent = p } }
   | STRUCT; n = IDENT; LBRACE; fs = struct_fields; RBRACE
     { DStruct { s_name = n; s_fields = fs } }
   | IMPL; cs = impl_caps; FOR; t = IDENT;
@@ -74,6 +81,17 @@ enum_variant:
 extends_opt:
   |                                              { [] }
   | EXTENDS; xs = ident_list_nonempty            { xs }
+
+cap_scope_opt:
+  |                                              { None }
+  | AT; sc = lifetime                            { Some sc }
+
+scope_parent_opt:
+  |                                              { None }
+  | UNDER; p = lifetime                          { Some p }
+
+lifetime:
+  | s = LIFETIME                                 { s }
 
 ident_list_nonempty:
   | x = IDENT                                    { [x] }
@@ -238,9 +256,9 @@ atom:
   | LOOP; b = block                                       { Loop b }
   | TRY; b = expr; CATCH; LBRACE; arms = catch_arms; RBRACE
       { Try { body = b; arms } }
-  (* §7.3 (provide @ Scope { ... }) / §7.4 (Wiring values, no `in`) — Stage 7 / Stage 9 *)
-  | PROVIDE; LBRACE; es = provide_entries; RBRACE; IN; b = block
-    { Provide { entries = es; scope = None; body = Some b } }
+  (* RFC-001 scoped wiring. Wiring values and spreads parse here, but remain
+     Stage-9 runtime work. *)
+  | w = with_caps_expr                                      { w }
 
 (* Stage 8: Rust-style restricted expression — used in the head position of
    `if` / `while` / `for ... in` (and `else if`) where a trailing `LBRACE`
@@ -288,8 +306,7 @@ head_atom:
   | IF; c = head_expr; t = block; e = else_opt               { If { cond = c; then_ = t; else_ = e } }
   | LOOP; b = block                                          { Loop b }
   | TRY; b = expr; CATCH; LBRACE; arms = catch_arms; RBRACE  { Try { body = b; arms } }
-  | PROVIDE; LBRACE; es = provide_entries; RBRACE; IN; b = block
-    { Provide { entries = es; scope = None; body = Some b } }
+  | w = with_caps_expr                                      { w }
 
 else_opt:
   |                                                       { None }
@@ -328,20 +345,38 @@ pat_arg:
   | n = IDENT
       { if n = "_" then PWild else PVar n }
 
-provide_entries:
+with_caps_expr:
+  | WITH; LBRACKET; es = with_entries; RBRACKET; sc = with_scope_opt; b = with_body_opt
+    { WithCaps { entries = es; scope = sc; body = b } }
+
+with_scope_opt:
+  |                                                       { None }
+  | AT; sc = lifetime                                    { Some sc }
+
+with_body_opt:
+  |                                                       { None }
+  | b = block                                             { Some b }
+
+with_entries:
   |                                                       { [] }
-  | e = provide_entry                                     { [e] }
-  | e = provide_entry; COMMA; rest = provide_entries      { e :: rest }
-  | e = provide_entry; rest = provide_entries_no_leading_comma  { e :: rest }
+  | e = with_entry                                        { [e] }
+  | e = with_entry; COMMA; rest = with_entries            { e :: rest }
+  | e = with_entry; rest = with_entries_no_leading_comma  { e :: rest }
 
-provide_entries_no_leading_comma:
-  | e = provide_entry                                     { [e] }
-  | e = provide_entry; COMMA; rest = provide_entries      { e :: rest }
-  | e = provide_entry; rest = provide_entries_no_leading_comma  { e :: rest }
+with_entries_no_leading_comma:
+  | e = with_entry                                        { [e] }
+  | e = with_entry; COMMA; rest = with_entries            { e :: rest }
+  | e = with_entry; rest = with_entries_no_leading_comma  { e :: rest }
 
-provide_entry:
-  | cap = IDENT; EQ; rhs = expr; AT; sc = IDENT
+with_entry:
+  | cap = IDENT; LARROW; rhs = expr; sc = binding_scope_opt
     { Binding { cap; rhs; scope = sc } }
+  | ELLIPSIS; e = expr
+    { Spread e }
+
+binding_scope_opt:
+  |                                                       { None }
+  | AT; sc = lifetime                                    { Some sc }
 
 dot_tail:
   |                                                      { None }

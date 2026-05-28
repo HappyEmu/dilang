@@ -1,11 +1,11 @@
 // A transaction is a Transaction-scoped capability whose Lifecycle
-// issues BEGIN/COMMIT/ROLLBACK on entry/exit of the `provide` block.
+// issues BEGIN/COMMIT/ROLLBACK on entry/exit of the `with` block.
 // There is no `transaction` keyword and no macro — the shape is the
 // same as every other scoped capability.
 
-scope Transaction
+scope 'Transaction under 'Process
 
-capability DbTx @ Transaction {
+capability DbTx @ 'Transaction {
     fn execute(sql: Sql)        raises {DbError}
     fn query(sql: Sql) -> Rows  raises {DbError}
 }
@@ -42,9 +42,9 @@ pub fn transfer_tasks(from: Uuid, to: Uuid)
     requires {WriteDb, Logger}
     raises   {DbFailure}
 {
-    provide @ Transaction {
-        DbTx = PgTransaction { conn: WriteDb.acquire() } @ Transaction
-    } in {
+    with [
+        DbTx <- PgTransaction { conn: WriteDb.acquire() }
+    ] @ 'Transaction {
         try {
             DbTx.execute(sql"UPDATE tasks SET owner = ${to} WHERE owner = ${from}")
             DbTx.execute(sql"INSERT INTO audit (event, at) VALUES ('transfer', NOW())")

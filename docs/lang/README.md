@@ -13,6 +13,8 @@ The capability-native language. Dependency injection as a first-class language f
    - [02-cross-tenant-leak.md](./guarantees/02-cross-tenant-leak.md) — multi-tenant workers reading/writing the wrong tenant's data.
    - [03-transaction-escape.md](./guarantees/03-transaction-escape.md) — a transaction handle used after COMMIT, directly or via deferred work.
 5. **[decisions.md](./decisions.md)** — terse log of design decisions and rejected alternatives, with stable `DEC-NNN` IDs for citation. Consult before re-opening a settled question.
+6. **[rfcs/](./rfcs/)** — syntax and semantic change proposals and accepted design records.
+   - [RFC-001 — `with` scoped wiring syntax](./rfcs/001-with-scoped-wiring.md) — defines `with [Cap <- expr] @ 'Scope { ... }`, apostrophe lifetime scopes, and `...` Wiring spread.
 
 ## Pointing into the docs
 

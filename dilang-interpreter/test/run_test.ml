@@ -87,13 +87,13 @@ let stress_deep_lets () =
   Alcotest.(check string) "deep lets" (string_of_int n ^ "\n") out
 
 let stress_many_cap_calls () =
-  (* 500 Logger.info calls in a single provide frame. *)
+  (* 500 Logger.info calls in a single with frame. *)
   let n = 500 in
   let b = Buffer.create (40 * n + 256) in
   Buffer.add_string b
     "capability Logger { fn info(msg: Str) }\n\
      fn main() {\n\
-     \    provide { Logger = StdoutLogger @ Process } in {\n";
+     \    with [ Logger <- StdoutLogger @ 'Process ] @ 'Process {\n";
   for i = 1 to n do
     Buffer.add_string b (Printf.sprintf "        Logger.info(\"line %d\")\n" i)
   done;
@@ -104,8 +104,8 @@ let stress_many_cap_calls () =
   Alcotest.(check string) "first" "line 1"   (List.nth lines 0);
   Alcotest.(check string) "last"  (Printf.sprintf "line %d" n) (List.nth lines (n - 1))
 
-let stress_nested_provide () =
-  (* 50 levels of nested `provide` blocks, each re-binding Logger and
+let stress_nested_with () =
+  (* 50 levels of nested `with` blocks, each re-binding Logger and
      calling info once. Tests cap_frame stack growth + Eio.Switch.run
      nesting. *)
   let n = 50 in
@@ -115,7 +115,7 @@ let stress_nested_provide () =
      fn main() {\n";
   for i = 1 to n do
     Buffer.add_string b
-      (Printf.sprintf "%sprovide { Logger = StdoutLogger @ Process } in {\n"
+      (Printf.sprintf "%swith [ Logger <- StdoutLogger @ 'Process ] @ 'Process {\n"
          (String.make (i * 4) ' '));
     Buffer.add_string b
       (Printf.sprintf "%sLogger.info(\"level %d\")\n"
@@ -146,12 +146,12 @@ let stress_long_extends_chain () =
   Buffer.add_string b "}\n";
   Buffer.add_string b (Printf.sprintf
     "fn main() {\n\
-     \    provide { C%d = Pinger @ Process } in { C0.ping(\"chain\") }\n\
+     \    with [ C%d <- Pinger @ 'Process ] @ 'Process { C0.ping(\"chain\") }\n\
      }\n" (n - 1));
   let out = run_string (Buffer.contents b) in
   Alcotest.(check string) "long extends chain" "got:chain\n" out
 
-let stress_wide_provide_chain () =
+let stress_wide_with_chain () =
   (* 20 bindings where each cap C_i's impl info() calls C_{i-1}.info().
      Verifies left-to-right cap-env capture across a long frame. *)
   let n = 20 in
@@ -169,16 +169,16 @@ let stress_wide_provide_chain () =
                        \    fn info(msg: Str) { C%d.info(\"${msg}\") }\n\
                        }\n" i i (i - 1))
   done;
-  Buffer.add_string b "fn main() {\n    provide {\n";
-  Buffer.add_string b "        C0 = Base @ Process\n";
+  Buffer.add_string b "fn main() {\n    with [\n";
+  Buffer.add_string b "        C0 <- Base @ 'Process\n";
   for i = 1 to n - 1 do
     Buffer.add_string b
-      (Printf.sprintf "        C%d = S%d @ Process\n" i i)
+      (Printf.sprintf "        C%d <- S%d @ 'Process\n" i i)
   done;
   Buffer.add_string b
-    (Printf.sprintf "    } in { C%d.info(\"go\") }\n}\n" (n - 1));
+    (Printf.sprintf "    ] @ 'Process { C%d.info(\"go\") }\n}\n" (n - 1));
   let out = run_string (Buffer.contents b) in
-  Alcotest.(check string) "wide provide chain" "0:go\n" out
+  Alcotest.(check string) "wide with chain" "0:go\n" out
 
 let stress_many_fields () =
   (* Struct with K fields. The method concatenates all self.f_i. *)
@@ -194,12 +194,12 @@ let stress_many_fields () =
   for i = 0 to k - 1 do
     Buffer.add_string b (Printf.sprintf "${self.f%d}" i)
   done;
-  Buffer.add_string b "\") }\n}\nfn main() {\n    provide { Cat = Big { ";
+  Buffer.add_string b "\") }\n}\nfn main() {\n    with [ Cat <- Big { ";
   for i = 0 to k - 1 do
     if i > 0 then Buffer.add_string b ", ";
     Buffer.add_string b (Printf.sprintf "f%d: \"%d\"" i i)
   done;
-  Buffer.add_string b " } @ Process } in { Cat.shout() }\n}\n";
+  Buffer.add_string b " } @ 'Process ] @ 'Process { Cat.shout() }\n}\n";
   let out = run_string (Buffer.contents b) in
   let expected = Buffer.create 64 in
   for i = 0 to k - 1 do
@@ -497,6 +497,107 @@ let stress_interpolation () =
   Buffer.add_char expected '\n';
   Alcotest.(check string) "huge interp" (Buffer.contents expected) out
 
+(* --- RFC-001 `with` scoped wiring -------------------------------------- *)
+
+let rfc_with_default_scope () =
+  let out =
+    run_string
+      "capability Logger { fn info(msg: Str) }\n\
+       fn main() {\n\
+       \    with [ Logger <- StdoutLogger ] @ 'Process {\n\
+       \        Logger.info(\"x\")\n\
+       \    }\n\
+       }\n"
+  in
+  Alcotest.(check string) "with default scope" "x\n" out
+
+let rfc_with_explicit_binding_scope () =
+  let out =
+    run_string
+      "capability Logger { fn info(msg: Str) }\n\
+       fn main() {\n\
+       \    with [ Logger <- StdoutLogger @ 'Process ] {\n\
+       \        Logger.info(\"x\")\n\
+       \    }\n\
+       }\n"
+  in
+  Alcotest.(check string) "with explicit binding scope" "x\n" out
+
+let rfc_with_missing_scope () =
+  check_raises_substr "with missing scope" "is missing a scope"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         fn main() {\n\
+         \    with [ Logger <- StdoutLogger ] {\n\
+         \        Logger.info(\"x\")\n\
+         \    }\n\
+         }\n")
+
+let rfc_with_nested_shadowing () =
+  let out =
+    run_string
+      "capability Logger { fn info(msg: Str) }\n\
+       struct Outer {}\n\
+       impl Logger for Outer { fn info(msg: Str) { print(\"outer:${msg}\") } }\n\
+       struct Inner {}\n\
+       impl Logger for Inner { fn info(msg: Str) { print(\"inner:${msg}\") } }\n\
+       fn main() {\n\
+       \    with [ Logger <- Outer ] @ 'Process {\n\
+       \        Logger.info(\"x\")\n\
+       \        with [ Logger <- Inner ] @ 'Process { Logger.info(\"x\") }\n\
+       \        Logger.info(\"x\")\n\
+       \    }\n\
+       }\n"
+  in
+  Alcotest.(check string) "with nested shadowing"
+    "outer:x\ninner:x\nouter:x\n" out
+
+let rfc_with_left_to_right_capture () =
+  let out =
+    run_string
+      "capability A { fn a() }\n\
+       capability B { fn b() }\n\
+       struct AImpl {}\n\
+       impl A for AImpl { fn a() { print(\"a\") } }\n\
+       struct BImpl {}\n\
+       impl B for BImpl { fn b() { A.a() print(\"b\") } }\n\
+       fn main() {\n\
+       \    with [\n\
+       \        A <- AImpl\n\
+       \        B <- BImpl\n\
+       \    ] @ 'Process { B.b() }\n\
+       }\n"
+  in
+  Alcotest.(check string) "with left-to-right capture" "a\nb\n" out
+
+let rfc_scope_and_cap_lifetime_parse () =
+  let out =
+    run_string
+      "scope 'Request under 'Process\n\
+       capability RequestCtx @ 'Request { fn id() -> Str }\n\
+       fn answer() -> I64 = 42\n\
+       fn main() { print(\"ok ${answer()}\") }\n"
+  in
+  Alcotest.(check string) "scope/cap lifetime parse" "ok 42\n" out
+
+let rfc_with_wiring_value_runtime_error () =
+  check_raises_substr "with wiring value" "Wiring values (`with [...]` without a body)"
+    (fun () ->
+      run_string
+        "capability Logger { fn info(msg: Str) }\n\
+         fn main() {\n\
+         \    let _w = with [ Logger <- StdoutLogger @ 'Process ]\n\
+         }\n")
+
+let rfc_with_spread_runtime_error () =
+  check_raises_substr "with spread" "`with` spread entries are not supported"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+         \    with [ ...42 ] @ 'Process { print(\"nope\") }\n\
+         }\n")
+
 (* --- negative paths ----------------------------------------------------- *)
 
 let neg_cap_not_in_scope () =
@@ -512,7 +613,7 @@ let neg_unknown_method () =
       run_string
         "capability Logger { fn info(msg: Str) }\n\
          fn main() {\n\
-         \    provide { Logger = StdoutLogger @ Process } in {\n\
+         \    with [ Logger <- StdoutLogger @ 'Process ] @ 'Process {\n\
          \        Logger.bogus(\"x\")\n\
          \    }\n\
          }\n")
@@ -532,13 +633,13 @@ let neg_unknown_function () =
   check_raises_substr "unknown function" "unknown function: nope"
     (fun () -> run_string "fn main() { nope(1) }\n")
 
-let neg_provide_non_impl () =
+let neg_with_non_impl () =
   check_raises_substr "non-impl rhs" "did not evaluate to an impl"
     (fun () ->
       run_string
         "capability Logger { fn info(msg: Str) }\n\
          fn main() {\n\
-         \    provide { Logger = 42 @ Process } in {\n\
+         \    with [ Logger <- 42 @ 'Process ] @ 'Process {\n\
          \        Logger.info(\"x\")\n\
          \    }\n\
          }\n")
@@ -547,8 +648,8 @@ let neg_type_error_binop () =
   check_raises_substr "type error" "type error"
     (fun () -> run_string "fn main() { print(1 + \"x\") }\n")
 
-let neg_provide_forward_ref () =
-  (* A's RHS uses B, but B is declared later in the same provide block. *)
+let neg_with_forward_ref () =
+  (* A's RHS uses B, but B is declared later in the same with block. *)
   check_raises_substr "forward ref" "capability B not in scope"
     (fun () ->
       run_string
@@ -568,10 +669,10 @@ let neg_provide_forward_ref () =
          \    fn a() { print(B.b()) }\n\
          }\n\
          fn main() {\n\
-         \    provide {\n\
-         \        A = UsesB @ Process,\n\
-         \        B = BImpl @ Process\n\
-         \    } in { A.a() }\n\
+         \    with [\n\
+         \        A <- UsesB @ 'Process,\n\
+         \        B <- BImpl @ 'Process\n\
+         \    ] @ 'Process { A.a() }\n\
          }\n")
 
 let neg_struct_missing_field () =
@@ -585,7 +686,7 @@ let neg_struct_missing_field () =
          \    fn info(msg: Str) { print(self.prefix) }\n\
          }\n\
          fn main() {\n\
-         \    provide { Logger = PrefixedLogger {} @ Process } in {\n\
+         \    with [ Logger <- PrefixedLogger {} @ 'Process ] @ 'Process {\n\
          \        Logger.info(\"x\")\n\
          \    }\n\
          }\n")
@@ -601,7 +702,7 @@ let neg_struct_unknown_field () =
          \    fn info(msg: Str) { print(self.prefix) }\n\
          }\n\
          fn main() {\n\
-         \    provide { Logger = PrefixedLogger { prefix: \"x\", bogus: \"y\" } @ Process } in {\n\
+         \    with [ Logger <- PrefixedLogger { prefix: \"x\", bogus: \"y\" } @ 'Process ] @ 'Process {\n\
          \        Logger.info(\"x\")\n\
          \    }\n\
          }\n")
@@ -614,7 +715,7 @@ let neg_missing_impl_method () =
          struct Empty {}\n\
          impl Logger for Empty {}\n\
          fn main() {\n\
-         \    provide { Logger = Empty @ Process } in {\n\
+         \    with [ Logger <- Empty @ 'Process ] @ 'Process {\n\
          \        Logger.info(\"x\")\n\
          \    }\n\
          }\n")
@@ -629,7 +730,7 @@ let neg_undeclared_field () =
          \    fn info(msg: Str) { print(self.nope) }\n\
          }\n\
          fn main() {\n\
-         \    provide { Logger = PrefixedLogger { prefix: \"x\" } @ Process } in {\n\
+         \    with [ Logger <- PrefixedLogger { prefix: \"x\" } @ 'Process ] @ 'Process {\n\
          \        Logger.info(\"y\")\n\
          \    }\n\
          }\n")
@@ -834,8 +935,8 @@ let () =
     ; "stage3",
       [ Alcotest.test_case "03_logger"             `Quick (stage_test ~name:"03_logger")
       ; Alcotest.test_case "03b_logger_stress"     `Quick (stage_test ~name:"03b_logger_stress")
-      ; Alcotest.test_case "03c_nested_provide"    `Quick (stage_test ~name:"03c_nested_provide")
-      ; Alcotest.test_case "03d_provide_locals"    `Quick (stage_test ~name:"03d_provide_with_locals")
+      ; Alcotest.test_case "03c_nested_with"    `Quick (stage_test ~name:"03c_nested_with")
+      ; Alcotest.test_case "03d_with_locals"    `Quick (stage_test ~name:"03d_with_locals")
       ]
     ; "stage4",
       [ Alcotest.test_case "04_user_impls"        `Quick (stage_test ~name:"04_user_impls")
@@ -881,7 +982,7 @@ let () =
       ; Alcotest.test_case "08d_for_defer"          `Quick (stage_test ~name:"08d_for_defer")
       ; Alcotest.test_case "08e_index_assign"       `Quick (stage_test ~name:"08e_index_assign")
       ; Alcotest.test_case "08f_method_chain"       `Quick (stage_test ~name:"08f_method_chain")
-      ; Alcotest.test_case "08g_for_inside_provide" `Quick (stage_test ~name:"08g_for_inside_provide")
+      ; Alcotest.test_case "08g_for_inside_with" `Quick (stage_test ~name:"08g_for_inside_with")
       ; Alcotest.test_case "08h_empty_push"         `Quick (stage_test ~name:"08h_empty_push")
       ]
     ; "stage9",
@@ -896,9 +997,9 @@ let () =
       ; Alcotest.test_case "deep_parens_200"       `Quick stress_deep_parens
       ; Alcotest.test_case "deep_lets_300"         `Quick stress_deep_lets
       ; Alcotest.test_case "many_cap_calls_500"    `Quick stress_many_cap_calls
-      ; Alcotest.test_case "nested_provide_50"     `Quick stress_nested_provide
+      ; Alcotest.test_case "nested_with_50"     `Quick stress_nested_with
       ; Alcotest.test_case "long_extends_chain"    `Quick stress_long_extends_chain
-      ; Alcotest.test_case "wide_provide_chain"    `Quick stress_wide_provide_chain
+      ; Alcotest.test_case "wide_with_chain"    `Quick stress_wide_with_chain
       ; Alcotest.test_case "many_fields_20"        `Quick stress_many_fields
       ; Alcotest.test_case "interpolation_200"     `Quick stress_interpolation
       ; Alcotest.test_case "deep_if_else_60"       `Quick stress_deep_if_else
@@ -914,15 +1015,25 @@ let () =
       ; Alcotest.test_case "array_push_1k"            `Quick stress_array_push_1k
       ; Alcotest.test_case "for_10k"                  `Quick stress_for_10k
       ]
+    ; "rfc001",
+      [ Alcotest.test_case "with_default_scope"          `Quick rfc_with_default_scope
+      ; Alcotest.test_case "with_explicit_binding_scope" `Quick rfc_with_explicit_binding_scope
+      ; Alcotest.test_case "with_missing_scope"          `Quick rfc_with_missing_scope
+      ; Alcotest.test_case "with_nested_shadowing"       `Quick rfc_with_nested_shadowing
+      ; Alcotest.test_case "with_left_to_right_capture"  `Quick rfc_with_left_to_right_capture
+      ; Alcotest.test_case "scope_and_cap_lifetime_parse" `Quick rfc_scope_and_cap_lifetime_parse
+      ; Alcotest.test_case "with_wiring_value_runtime_error" `Quick rfc_with_wiring_value_runtime_error
+      ; Alcotest.test_case "with_spread_runtime_error"   `Quick rfc_with_spread_runtime_error
+      ]
     ; "errors",
       [ Alcotest.test_case "cap_not_in_scope"    `Quick neg_cap_not_in_scope
       ; Alcotest.test_case "unknown_method"      `Quick neg_unknown_method
       ; Alcotest.test_case "arity_mismatch"      `Quick neg_arity_mismatch
       ; Alcotest.test_case "div_by_zero"         `Quick neg_div_by_zero
       ; Alcotest.test_case "unknown_function"    `Quick neg_unknown_function
-      ; Alcotest.test_case "provide_non_impl"    `Quick neg_provide_non_impl
+      ; Alcotest.test_case "with_non_impl"    `Quick neg_with_non_impl
       ; Alcotest.test_case "type_error_binop"    `Quick neg_type_error_binop
-      ; Alcotest.test_case "provide_forward_ref"   `Quick neg_provide_forward_ref
+      ; Alcotest.test_case "with_forward_ref"   `Quick neg_with_forward_ref
       ; Alcotest.test_case "struct_missing_field"  `Quick neg_struct_missing_field
       ; Alcotest.test_case "struct_unknown_field"  `Quick neg_struct_unknown_field
       ; Alcotest.test_case "missing_impl_method"   `Quick neg_missing_impl_method

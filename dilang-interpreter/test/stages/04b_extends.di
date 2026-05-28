@@ -12,5 +12,5 @@ fn show() requires {ReadDb} {
 }
 
 fn main() {
-    provide { WriteDb = EchoDb @ Process } in { show() }
+    with [ WriteDb <- EchoDb @ 'Process ] @ 'Process { show() }
 }

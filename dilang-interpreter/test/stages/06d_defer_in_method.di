@@ -11,7 +11,7 @@ impl Worker for W {
 
 fn outer() {
     defer print("outer fn cleanup")
-    provide { Worker = W @ Process } in {
+    with [ Worker <- W @ 'Process ] @ 'Process {
         Worker.run("one")
         Worker.run("two")
         print("after both calls")

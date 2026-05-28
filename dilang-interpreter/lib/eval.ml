@@ -200,27 +200,41 @@ let rec eval (ctx : ctx) = function
             | _ -> VEnum { ty = "Option"; tag = "Some"; payload = [v] })
        | VEnum { ty = "Option"; tag = "None"; _ } as none -> none
        | _ -> type_err "?. recv not Option<Impl>")
-  | Provide { entries; scope; body = Some b } ->
+  | WithCaps { entries; scope; body = Some b } ->
       Eio.Switch.run @@ fun sw ->
-      let scope_name = Option.value scope ~default:"Process" in
+      let first_entry_scope =
+        List.find_map
+          (function Binding { scope = Some sc; _ } -> Some sc | _ -> None)
+          entries
+      in
+      let scope_name = Option.value scope ~default:(Option.value first_entry_scope ~default:"Process") in
       let built = ref [] in
       List.iter (function
-        | Binding { cap; rhs; scope = _ } ->
+        | Binding { cap; rhs; scope = binding_scope } ->
+            let _effective_scope =
+              match binding_scope, scope with
+              | Some sc, _ -> sc
+              | None, Some sc -> sc
+              | None, None ->
+                  failwith
+                    ("`with` binding " ^ cap
+                     ^ " is missing a scope; add `@ 'Scope` to the binding or `with [...] @ 'Scope`")
+            in
             (* Build partial frame from prior bindings so each RHS resolves
-               against bindings declared *to its left* in the same provide
+               against bindings declared *to its left* in the same with
                block. Forward references raise "capability X not in scope". *)
             let partial = { scope = scope_name; bindings = List.rev !built; switch = sw } in
             let caps_now = partial :: ctx.caps in
             let ctx_bind = { ctx with caps = caps_now } in
             (match eval ctx_bind rhs with
              | VImpl iv -> built := (cap, with_cap_env iv caps_now) :: !built
-             | _ -> failwith ("provide binding for " ^ cap ^ " did not evaluate to an impl"))
-        | Using _ -> failwith "`using` is not supported in Stage 4 (Stage 9)"
+             | _ -> failwith ("with binding for " ^ cap ^ " did not evaluate to an impl"))
+        | Spread _ -> failwith "`with` spread entries are not supported in Stage 4 (Stage 9)"
       ) entries;
       let frame = { scope = scope_name; bindings = List.rev !built; switch = sw } in
       eval { ctx with caps = frame :: ctx.caps } b
-  | Provide { body = None; _ } ->
-      failwith "Wiring values (provide without `in`) are not supported in Stage 4 (Stage 9)"
+  | WithCaps { body = None; _ } ->
+      failwith "Wiring values (`with [...]` without a body) are not supported in Stage 4 (Stage 9)"
   | MethodCall { target; name; args } ->
       (* Stage 8 (D1): one parser node, two eval paths. If the target is a
          bare name of a declared capability, route to capability dispatch;

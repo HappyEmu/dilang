@@ -11,9 +11,9 @@ fn build_prefix(name: Str) -> Str {
 }
 
 fn main() {
-    provide {
-        Logger = PrefixedLogger { prefix: build_prefix("auth") } @ Process
-    } in {
+    with [
+        Logger <- PrefixedLogger { prefix: build_prefix("auth") } @ 'Process
+    ] @ 'Process {
         Logger.info("ready")
         Logger.info("ok")
     }

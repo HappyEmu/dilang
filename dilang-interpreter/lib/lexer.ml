@@ -19,7 +19,9 @@ let keyword_or_ident s =
   | "mut"        -> MUT
   | "return"     -> RETURN
   | "capability" -> CAPABILITY
-  | "provide"    -> PROVIDE
+  | "with"       -> WITH
+  | "scope"      -> SCOPE
+  | "under"      -> UNDER
   | "requires"   -> REQUIRES
   | "raises"     -> RAISES
   | "in"         -> IN
@@ -96,8 +98,13 @@ let rec token buf =
   | line_comment -> token buf
   | int_lit      -> INT (Int64.of_string (Sedlexing.Utf8.lexeme buf))
   | '"'          -> lex_string buf
+  | '\'', identifier ->
+      let s = Sedlexing.Utf8.lexeme buf in
+      LIFETIME (String.sub s 1 (String.length s - 1))
   | identifier   -> keyword_or_ident (Sedlexing.Utf8.lexeme buf)
+  | "..."  -> ELLIPSIS
   | "->"   -> ARROW
+  | "<-"   -> LARROW
   | "=="   -> EQEQ
   | "!="   -> BANGEQ
   | "<="   -> LEQ

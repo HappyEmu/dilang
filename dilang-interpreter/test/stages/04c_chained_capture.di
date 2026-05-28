@@ -18,13 +18,13 @@ impl C for CImpl {
 }
 
 fn main() {
-    provide {
-        A = AImpl @ Process
-        B = BImpl @ Process
-        C = CImpl @ Process
-    } in {
+    with [
+        A <- AImpl @ 'Process
+        B <- BImpl @ 'Process
+        C <- CImpl @ 'Process
+    ] @ 'Process {
         C.c("hi")
-        provide { A = AImpl @ Process } in {
+        with [ A <- AImpl @ 'Process ] @ 'Process {
             C.c("inner")
         }
     }
