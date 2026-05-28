@@ -1,9 +1,8 @@
 # RFC-001 — `with` scoped wiring syntax
 
-Status: Accepted for the next surface-syntax pass; not implemented by the
-current interpreter.
+Status: Accepted and implemented by the current interpreter.
 
-The interpreter currently implements the Stage 3/4 `provide` syntax:
+Before this RFC, the interpreter implemented the Stage 3/4 `provide` syntax:
 
 ```di
 provide {
@@ -35,7 +34,7 @@ is purely surface syntax, plus a more explicit lifetime-scope notation.
 
 ### 1.1 Scope names are lifetime identifiers
 
-Current docs and interpreter plans:
+Previous docs and interpreter plans:
 
 ```di
 scope Request
@@ -75,7 +74,7 @@ trait Ord extends Eq
 
 ### 1.2 `with [...] @ 'Scope { ... }` replaces scoped `provide`
 
-Current docs/plans:
+Previous docs/plans:
 
 ```di
 provide @ Request {
@@ -100,7 +99,7 @@ not carry its own explicit `@ 'Scope`.
 
 ### 1.3 Binding entries use `<-`
 
-Current interpreter/docs:
+Previous interpreter/docs:
 
 ```di
 Logger = JsonLogger @ Process
@@ -131,7 +130,7 @@ that scope entry as before.
 
 ### 1.4 Spread replaces `using`
 
-Current interpreter plan:
+Previous interpreter plan:
 
 ```di
 provide {
@@ -310,7 +309,7 @@ It makes override order visible without adding another directive keyword.
 
 ### 4.1 Process wiring
 
-Current docs/plans:
+Previous docs/plans:
 
 ```di
 fn prod_runtime() -> Wiring {
@@ -348,7 +347,7 @@ fn main() = with [
 
 ### 4.2 Request scope
 
-Current docs/plans:
+Previous docs/plans:
 
 ```di
 scope Request
@@ -604,18 +603,16 @@ and visible: entries after `...prod_wiring()` replace production bindings.
 
 ## 6. Parser and interpreter impact
 
-The current interpreter does not implement this RFC. The migration is mostly
-surface syntax but is not zero-cost:
+The current interpreter implements this RFC. The migration was mostly surface
+syntax but touched the lexer, parser, AST, tests, and docs:
 
-1. Lexer: add lifetime tokens for apostrophe-prefixed names, `<-`, and `...`.
-2. Parser: replace or parallel the existing `Provide` grammar with `with`
+1. Lexer: added lifetime tokens for apostrophe-prefixed names, `<-`, and `...`.
+2. Parser: replaced the existing `Provide` grammar with `with`
    expressions and square-bracket entry lists.
-3. AST: either rename `Provide` to a neutral node (`WithCaps`, `CapScope`) or
-   keep `Provide` as the semantic node and map `with` into it.
-4. Scope model: update scope identifiers from plain `ident` to lifetime names.
-5. Wiring entries: replace `Using` with spread entries.
-6. Tests: keep old interpreter stage tests until the syntax migration stage,
-   then mechanically rewrite `provide` examples to `with`.
+3. AST: uses the neutral `WithCaps` node for capability provisioning.
+4. Scope model: scope identifiers are apostrophe-prefixed lifetime names.
+5. Wiring entries: spread entries use `...`.
+6. Tests and docs: current fixtures and examples use `with`.
 
 The semantic core should not change: capability lookup, left-to-right binding,
 shadowing, impl-private `requires`, `Lifecycle`, and Wiring static checks all
