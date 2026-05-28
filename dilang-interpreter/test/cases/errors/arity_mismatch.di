@@ -1,0 +1,5 @@
+fn add(a: I64, b: I64) -> I64 { a + b }
+
+fn main() {
+    print(add(1))
+}

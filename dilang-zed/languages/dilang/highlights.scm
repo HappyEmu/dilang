@@ -44,6 +44,7 @@
   "test"
   "extends"
   "for"
+  "under"
   "where"
 ] @keyword
 
@@ -51,9 +52,7 @@
 [
   "requires"
   "raises"
-  "provide"
-  "using"
-  "in"
+  "with"
 ] @keyword
 
 ; Control-flow keywords
@@ -130,6 +129,7 @@
 ; Types
 ; -----------------------------------------------------------------------------
 (type_identifier) @type
+(lifetime_identifier) @type
 
 ; Built-in primitive / stdlib types and the capabilities that ship with the
 ; runtime. These get a more specific capture than plain @type.
@@ -166,12 +166,12 @@
 ; -----------------------------------------------------------------------------
 ; Wiring
 ; -----------------------------------------------------------------------------
-(provide_binding
+(with_binding
   cap:   (type_identifier) @type)
-(provide_binding
-  scope: (type_identifier) @type)
+(with_binding
+  scope: (lifetime_identifier) @type)
 (scope_annotation
-  (type_identifier) @type)
+  (lifetime_identifier) @type)
 
 ; -----------------------------------------------------------------------------
 ; Punctuation & operators
@@ -207,6 +207,7 @@
   "/"
   "%"
   "="
+  "<-"
   "=="
   "!="
   "<"

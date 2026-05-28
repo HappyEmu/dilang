@@ -4,4 +4,5 @@
  (deps
   (source_tree stages)
   (source_tree expect)
+  (source_tree cases)
   (source_tree programs)))

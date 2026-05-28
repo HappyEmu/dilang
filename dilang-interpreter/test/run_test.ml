@@ -15,6 +15,29 @@ let stage_test ~name () =
   let expected = read_file expect in
   Alcotest.(check string) name expected actual
 
+let trim_ascii s =
+  let is_space = function ' ' | '\n' | '\r' | '\t' -> true | _ -> false in
+  let len = String.length s in
+  let left = ref 0 in
+  while !left < len && is_space s.[!left] do
+    incr left
+  done;
+  let right = ref (len - 1) in
+  while !right >= !left && is_space s.[!right] do
+    decr right
+  done;
+  if !right < !left then "" else String.sub s !left (!right - !left + 1)
+
+let case_file dir name ext =
+  "cases/" ^ dir ^ "/" ^ name ^ ext
+
+let case_output ~dir ~name () =
+  let buf = Buffer.create 256 in
+  Dilang.Driver.run_file_to_buffer (case_file dir name ".di") buf;
+  let actual = Buffer.contents buf in
+  let expected = read_file (case_file dir name ".out") in
+  Alcotest.(check string) name expected actual
+
 let run_string src =
   let buf = Buffer.create 256 in
   Dilang.Driver.run_string_to_buffer src buf;
@@ -28,6 +51,13 @@ let check_raises_substr label substr thunk =
   | Failure msg when msg = substr || (try ignore (Str.search_forward (Str.regexp_string substr) msg 0); true with Not_found -> false) -> ()
   | Failure msg ->
       Alcotest.failf "%s: expected substring %S, got %S" label substr msg
+
+let case_error ~dir ~name () =
+  let expected = trim_ascii (read_file (case_file dir name ".err")) in
+  check_raises_substr name expected (fun () ->
+    let buf = Buffer.create 256 in
+    Dilang.Driver.run_file_to_buffer (case_file dir name ".di") buf;
+    Buffer.contents buf)
 
 (* --- generated stress programs ----------------------------------------- *)
 
@@ -500,297 +530,84 @@ let stress_interpolation () =
 (* --- RFC-001 `with` scoped wiring -------------------------------------- *)
 
 let rfc_with_default_scope () =
-  let out =
-    run_string
-      "capability Logger { fn info(msg: Str) }\n\
-       fn main() {\n\
-       \    with [ Logger <- StdoutLogger ] @ 'Process {\n\
-       \        Logger.info(\"x\")\n\
-       \    }\n\
-       }\n"
-  in
-  Alcotest.(check string) "with default scope" "x\n" out
+  case_output ~dir:"rfc001" ~name:"with_default_scope" ()
 
 let rfc_with_explicit_binding_scope () =
-  let out =
-    run_string
-      "capability Logger { fn info(msg: Str) }\n\
-       fn main() {\n\
-       \    with [ Logger <- StdoutLogger @ 'Process ] {\n\
-       \        Logger.info(\"x\")\n\
-       \    }\n\
-       }\n"
-  in
-  Alcotest.(check string) "with explicit binding scope" "x\n" out
+  case_output ~dir:"rfc001" ~name:"with_explicit_binding_scope" ()
 
 let rfc_with_missing_scope () =
-  check_raises_substr "with missing scope" "is missing a scope"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         fn main() {\n\
-         \    with [ Logger <- StdoutLogger ] {\n\
-         \        Logger.info(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"rfc001" ~name:"with_missing_scope" ()
 
 let rfc_with_nested_shadowing () =
-  let out =
-    run_string
-      "capability Logger { fn info(msg: Str) }\n\
-       struct Outer {}\n\
-       impl Logger for Outer { fn info(msg: Str) { print(\"outer:${msg}\") } }\n\
-       struct Inner {}\n\
-       impl Logger for Inner { fn info(msg: Str) { print(\"inner:${msg}\") } }\n\
-       fn main() {\n\
-       \    with [ Logger <- Outer ] @ 'Process {\n\
-       \        Logger.info(\"x\")\n\
-       \        with [ Logger <- Inner ] @ 'Process { Logger.info(\"x\") }\n\
-       \        Logger.info(\"x\")\n\
-       \    }\n\
-       }\n"
-  in
-  Alcotest.(check string) "with nested shadowing"
-    "outer:x\ninner:x\nouter:x\n" out
+  case_output ~dir:"rfc001" ~name:"with_nested_shadowing" ()
 
 let rfc_with_left_to_right_capture () =
-  let out =
-    run_string
-      "capability A { fn a() }\n\
-       capability B { fn b() }\n\
-       struct AImpl {}\n\
-       impl A for AImpl { fn a() { print(\"a\") } }\n\
-       struct BImpl {}\n\
-       impl B for BImpl { fn b() { A.a() print(\"b\") } }\n\
-       fn main() {\n\
-       \    with [\n\
-       \        A <- AImpl\n\
-       \        B <- BImpl\n\
-       \    ] @ 'Process { B.b() }\n\
-       }\n"
-  in
-  Alcotest.(check string) "with left-to-right capture" "a\nb\n" out
+  case_output ~dir:"rfc001" ~name:"with_left_to_right_capture" ()
 
 let rfc_scope_and_cap_lifetime_parse () =
-  let out =
-    run_string
-      "scope 'Request under 'Process\n\
-       capability RequestCtx @ 'Request { fn id() -> Str }\n\
-       fn answer() -> I64 = 42\n\
-       fn main() { print(\"ok ${answer()}\") }\n"
-  in
-  Alcotest.(check string) "scope/cap lifetime parse" "ok 42\n" out
+  case_output ~dir:"rfc001" ~name:"scope_and_cap_lifetime_parse" ()
 
 let rfc_with_wiring_value_runtime_error () =
-  check_raises_substr "with wiring value" "Wiring values (`with [...]` without a body)"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         fn main() {\n\
-         \    let _w = with [ Logger <- StdoutLogger @ 'Process ]\n\
-         }\n")
+  case_error ~dir:"rfc001" ~name:"with_wiring_value_runtime_error" ()
 
 let rfc_with_spread_runtime_error () =
-  check_raises_substr "with spread" "`with` spread entries are not supported"
-    (fun () ->
-      run_string
-        "fn main() {\n\
-         \    with [ ...42 ] @ 'Process { print(\"nope\") }\n\
-         }\n")
+  case_error ~dir:"rfc001" ~name:"with_spread_runtime_error" ()
 
 (* --- negative paths ----------------------------------------------------- *)
 
 let neg_cap_not_in_scope () =
-  check_raises_substr "cap not in scope" "capability Logger not in scope"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         fn main() { Logger.info(\"oops\") }\n")
+  case_error ~dir:"errors" ~name:"cap_not_in_scope" ()
 
 let neg_unknown_method () =
-  check_raises_substr "unknown method" "has no method bogus"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         fn main() {\n\
-         \    with [ Logger <- StdoutLogger @ 'Process ] @ 'Process {\n\
-         \        Logger.bogus(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"unknown_method" ()
 
 let neg_arity_mismatch () =
-  check_raises_substr "arity" "arity mismatch"
-    (fun () ->
-      run_string
-        "fn add(a: I64, b: I64) -> I64 { a + b }\n\
-         fn main() { print(add(1)) }\n")
+  case_error ~dir:"errors" ~name:"arity_mismatch" ()
 
 let neg_div_by_zero () =
-  check_raises_substr "division" "division by zero"
-    (fun () -> run_string "fn main() { print(1 / 0) }\n")
+  case_error ~dir:"errors" ~name:"div_by_zero" ()
 
 let neg_unknown_function () =
-  check_raises_substr "unknown function" "unknown function: nope"
-    (fun () -> run_string "fn main() { nope(1) }\n")
+  case_error ~dir:"errors" ~name:"unknown_function" ()
 
 let neg_with_non_impl () =
-  check_raises_substr "non-impl rhs" "did not evaluate to an impl"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         fn main() {\n\
-         \    with [ Logger <- 42 @ 'Process ] @ 'Process {\n\
-         \        Logger.info(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"with_non_impl" ()
 
 let neg_type_error_binop () =
-  check_raises_substr "type error" "type error"
-    (fun () -> run_string "fn main() { print(1 + \"x\") }\n")
+  case_error ~dir:"errors" ~name:"type_error_binop" ()
 
 let neg_with_forward_ref () =
-  (* A's RHS uses B, but B is declared later in the same with block. *)
-  check_raises_substr "forward ref" "capability B not in scope"
-    (fun () ->
-      run_string
-        "capability A { fn a() }\n\
-         capability B { fn b() -> Str }\n\
-         struct AImpl {}\n\
-         impl A for AImpl {\n\
-         \    requires {B}\n\
-         \    fn a() { print(B.b()) }\n\
-         }\n\
-         struct BImpl {}\n\
-         impl B for BImpl {\n\
-         \    fn b() -> Str { \"hi\" }\n\
-         }\n\
-         struct UsesB {}\n\
-         impl A for UsesB {\n\
-         \    fn a() { print(B.b()) }\n\
-         }\n\
-         fn main() {\n\
-         \    with [\n\
-         \        A <- UsesB @ 'Process,\n\
-         \        B <- BImpl @ 'Process\n\
-         \    ] @ 'Process { A.a() }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"with_forward_ref" ()
 
 let neg_struct_missing_field () =
-  check_raises_substr "missing field"
-    "struct PrefixedLogger is missing field prefix"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         struct PrefixedLogger { prefix: Str }\n\
-         impl Logger for PrefixedLogger {\n\
-         \    fn info(msg: Str) { print(self.prefix) }\n\
-         }\n\
-         fn main() {\n\
-         \    with [ Logger <- PrefixedLogger {} @ 'Process ] @ 'Process {\n\
-         \        Logger.info(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"struct_missing_field" ()
 
 let neg_struct_unknown_field () =
-  check_raises_substr "unknown field"
-    "struct PrefixedLogger has no field bogus"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         struct PrefixedLogger { prefix: Str }\n\
-         impl Logger for PrefixedLogger {\n\
-         \    fn info(msg: Str) { print(self.prefix) }\n\
-         }\n\
-         fn main() {\n\
-         \    with [ Logger <- PrefixedLogger { prefix: \"x\", bogus: \"y\" } @ 'Process ] @ 'Process {\n\
-         \        Logger.info(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"struct_unknown_field" ()
 
 let neg_missing_impl_method () =
-  check_raises_substr "missing method" "has no method info"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         struct Empty {}\n\
-         impl Logger for Empty {}\n\
-         fn main() {\n\
-         \    with [ Logger <- Empty @ 'Process ] @ 'Process {\n\
-         \        Logger.info(\"x\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"missing_impl_method" ()
 
 let neg_undeclared_field () =
-  check_raises_substr "undeclared field" "no field nope"
-    (fun () ->
-      run_string
-        "capability Logger { fn info(msg: Str) }\n\
-         struct PrefixedLogger { prefix: Str }\n\
-         impl Logger for PrefixedLogger {\n\
-         \    fn info(msg: Str) { print(self.nope) }\n\
-         }\n\
-         fn main() {\n\
-         \    with [ Logger <- PrefixedLogger { prefix: \"x\" } @ 'Process ] @ 'Process {\n\
-         \        Logger.info(\"y\")\n\
-         \    }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"undeclared_field" ()
 
 let neg_unknown_variant_in_catch () =
-  check_raises_substr "unknown variant" "uncaught raise: A"
-    (fun () ->
-      run_string
-        "enum E { A }\n\
-         fn main() {\n\
-         \    try { raise A } catch { Bogus -> print(\"never\") }\n\
-         }\n")
+  case_error ~dir:"errors" ~name:"unknown_variant_catch" ()
 
 let neg_unmatched_catch_propagates () =
-  check_raises_substr "unmatched catch" "uncaught raise: A"
-    (fun () ->
-      run_string
-        "enum E { A, B }\n\
-         fn inner() { try { raise A } catch { B -> print(\"never\") } }\n\
-         fn main() { inner() }\n")
+  case_error ~dir:"errors" ~name:"unmatched_catch" ()
 
 let neg_coalesce_lhs_not_option () =
-  check_raises_substr "?? lhs not Option" "?? lhs not an Option"
-    (fun () ->
-      run_string
-        "fn main() { print(42 ?? \"fallback\") }\n")
+  case_error ~dir:"errors" ~name:"coalesce_lhs_not_opt" ()
 
 let neg_if_cond_not_bool () =
-  check_raises_substr "if cond not Bool" "if condition not Bool"
-    (fun () ->
-      run_string
-        "fn main() { if 1 { print(\"x\") } }\n")
+  case_error ~dir:"errors" ~name:"if_cond_not_bool" ()
 
 let neg_some_arity () =
-  check_raises_substr "Some arity"
-    "variant Some expects 1 argument(s), got 2"
-    (fun () ->
-      run_string
-        "fn main() { print(Some(1, 2)) }\n")
+  case_error ~dir:"errors" ~name:"some_arity" ()
 
 let err_defer_body_raises_is_swallowed () =
-  (* A defer body raises a `Dilang_error`. v0 policy: swallow.
-     Verifies (a) the swallow doesn't break later defers in the same
-     activation, (b) the inner raise doesn't propagate out of the activation.
-     Defers fire LIFO, so the raising one (registered last) fires first. *)
-  let src =
-    "enum E { Boom }\n\
-     fn noisy() {\n\
-    \    defer print(\"d1\")\n\
-    \    defer raise Boom\n\
-    \    print(\"body\")\n\
-     }\n\
-     fn main() {\n\
-    \    noisy()\n\
-    \    print(\"after\")\n\
-     }\n"
-  in
-  let out = run_string src in
-  Alcotest.(check string) "defer raise is swallowed"
-    "body\nd1\nafter\n" out
+  case_output ~dir:"errors" ~name:"defer_body_raises_swallowed" ()
 
 (* --- Stage 7 negatives -------------------------------------------------- *)
 

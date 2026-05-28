@@ -232,7 +232,7 @@ impl[<generics>] Cap1 [+ Cap2] for Type[<generics>] [where bounds] {
 }
 ```
 
-An **inherent impl** declares a type's own methods with no capability or trait interface — written `impl Type { ... }` (no `for`). These are the methods that belong to the value itself, reached by receiver (value-method dispatch, DEC-020), never through a `provide` block. See DEC-022.
+An **inherent impl** declares a type's own methods with no capability or trait interface — written `impl Type { ... }` (no `for`). These are the methods that belong to the value itself, reached by receiver (value-method dispatch, DEC-020), never through a `with` block. See DEC-022.
 
 ```di
 struct Router { routes: [Route] }
@@ -248,7 +248,7 @@ impl Router {
 let r = Router { routes: [] }.get("/", hello).get("/time", now)
 ```
 
-Use an inherent impl when the methods are intrinsic to the type (a `Router`'s `dispatch`); use `impl Cap for Type` when the type is *satisfying a named interface* — a capability bound through `provide`, or (once traits land) a trait resolved by receiver. The two forms compose: a type may have an inherent impl and one or more `impl Cap for Type` blocks; their methods merge (duplicate names across blocks are rejected).
+Use an inherent impl when the methods are intrinsic to the type (a `Router`'s `dispatch`); use `impl Cap for Type` when the type is *satisfying a named interface* — a capability bound through `with`, or (once traits land) a trait resolved by receiver. The two forms compose: a type may have an inherent impl and one or more `impl Cap for Type` blocks; their methods merge (duplicate names across blocks are rejected).
 
 ### 4.3 Impl-private requires
 
@@ -304,7 +304,7 @@ r.handler()        // the impl method → "route"
 (r.handler)(req)   // the field-held function, applied to req
 ```
 
-Value-method calls run with `self` bound to the receiver and the **caller's** capabilities in scope — a struct method that calls a capability resolves it against the `provide` stack active at the call site, not at construction.
+Value-method calls run with `self` bound to the receiver and the **caller's** capabilities in scope — a struct method that calls a capability resolves it against the `with` stack active at the call site, not at construction.
 
 -----
 
@@ -529,7 +529,7 @@ xs.push(4)
 print(xs[3])                              // 4
 ```
 
-This same value-method dispatch (resolution by the runtime type of the receiver, not through a `provide` block) now also covers user-struct `impl` methods — `point.dist()` calls a method from an `impl … for Point` block — not just the built-in `[T]` and `Str` methods. See §4.6 and DEC-020.
+This same value-method dispatch (resolution by the runtime type of the receiver, not through a `with` block) now also covers user-struct `impl` methods — `point.dist()` calls a method from an `impl … for Point` block — not just the built-in `[T]` and `Str` methods. See §4.6 and DEC-020.
 
 Iteration uses `for x in xs { ... }`. The loop var is immutable per iteration; `break` and `continue` work the same as in `while`. Per DEC-013 `for` is a statement, not an expression — it always evaluates to `()`. Mutating `xs[i] = v` and `xs.push(v)` work in v0 even when `xs` is bound with plain `let`; DEC-015 will eventually require `let mut`.
 

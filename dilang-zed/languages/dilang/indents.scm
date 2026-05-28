@@ -9,7 +9,7 @@
   (member_block)
   (impl_body)
   (struct_fields)
-  (provide_body)
+  (with_entries)
   (parameter_list)
   (argument_list)
   (list_literal)
