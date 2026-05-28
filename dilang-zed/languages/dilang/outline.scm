@@ -33,7 +33,7 @@
 
 (scope_definition
   "scope" @context
-  name: (type_identifier) @name) @item
+  name: (lifetime_identifier) @name) @item
 
 (test_block
   "test" @context

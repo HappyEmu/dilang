@@ -12,7 +12,7 @@ fn greet(name: Str)
 }
 
 fn main() {
-    with [Logger <- StdoutLogger()] @ 'Process {
+    with [Logger <- StdoutLogger] @ 'Process {
         greet("world")
     }
 }

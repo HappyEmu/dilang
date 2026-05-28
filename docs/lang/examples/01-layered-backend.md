@@ -298,18 +298,18 @@ fn router() -> Router<{TaskRepo, UserRepo, TokenSigner, Logger, Clock,
 
 ```di
 fn main() {
-    let rt = FiberRuntime(workers: 8)
+    let rt = FiberRuntime { workers: 8 }
 
     with [
         IO          <- rt
-        Logger      <- JsonLogger()
-        Clock       <- SystemClock()
-        IdGen       <- UuidV7Gen()
-        WriteDb     <- Postgres(IO.env("DB_URL") ?? "")
+        Logger      <- JsonLogger
+        Clock       <- SystemClock
+        IdGen       <- UuidV7Gen
+        WriteDb     <- Postgres { url: IO.env("DB_URL") ?? "" }
         TaskRepo    <- PgTaskRepo {}
         UserRepo    <- PgUserRepo {}
-        TokenSigner <- Hs256Signer(IO.env("JWT_SECRET")
-                                   ?? panic("JWT_SECRET"))
+        TokenSigner <- Hs256Signer { secret: IO.env("JWT_SECRET")
+                                             ?? panic("JWT_SECRET") }
     ] @ 'Process {
         serve(8080, router())
     }
@@ -436,18 +436,18 @@ Test setup defines reusable `Wiring` values and spreads them with `...`.
 ```di
 fn test_runtime() -> Wiring {
     with [
-        IO     <- TestIO()                                          @ 'Process
-        Logger <- TestLogger()                                      @ 'Process
-        Clock  <- FixedClock(Instant.parse("2026-05-22T12:00:00Z")) @ 'Process
-        IdGen  <- SeqIdGen([Uuid.parse("t1"), Uuid.parse("t2")])    @ 'Process
+        IO     <- TestIO                                           @ 'Process
+        Logger <- TestLogger                                       @ 'Process
+        Clock  <- FixedClock { instant: Instant.parse("2026-05-22T12:00:00Z") } @ 'Process
+        IdGen  <- SeqIdGen { ids: [Uuid.parse("t1"), Uuid.parse("t2")] }        @ 'Process
     ]
 }
 
 fn test_repos() -> Wiring {
-    let users = InMemoryUserRepo()
+    let users = InMemoryUserRepo
     users.insert(User { id: Uuid.parse("u1"), email: "a@b", name: "Alice" })
     with [
-        TaskRepo <- InMemoryTaskRepo() @ 'Process
+        TaskRepo <- InMemoryTaskRepo @ 'Process
         UserRepo <- users              @ 'Process
     ]
 }
@@ -477,7 +477,7 @@ test "create_task rejects empty title" {
 test "create_task fails when owner does not exist" {
     with [
         ...test_runtime(), ...test_repos(),
-        UserRepo <- InMemoryUserRepo(),    // overrides test_repos()'s populated UserRepo
+        UserRepo <- InMemoryUserRepo,    // overrides test_repos()'s populated UserRepo
     ] @ 'Process {
         try create_task(Uuid.parse("u999"), CreateTaskInput { title: "x" }) catch {
             NotFound -> {}

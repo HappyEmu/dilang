@@ -4,14 +4,17 @@ A capability-native programming language.
 
 Two ideas, one mechanism:
 
-- **Dependency injection as a first-class language feature**, checked at compile time. Services, configuration, and the runtime itself are tracked as **capability rows** in function signatures and bound by lexical `provide` blocks. No annotations, no containers, no runtime DI framework.
+- **Dependency injection as a first-class language feature**, checked at compile time. Services, configuration, and the runtime itself are tracked as **capability rows** in function signatures and bound by lexical `with` blocks. No annotations, no containers, no runtime DI framework.
 - **No function coloring.** There is no `async`/`await` and no split standard library. Calls that may suspend look identical to calls that don't, because anything that might suspend goes through a capability (typically `IO`) whose implementation is chosen at `main`.
 
 ```di
 // Each capability declares which scope it lives in.
-capability Logger     @ Process     { fn info(msg: Str) }
-capability RequestCtx @ Request     { fn user_id() -> Uuid }
-capability DbTx       @ Transaction { fn execute(sql: Sql) raises {DbError} }
+scope 'Request under 'Process
+scope 'Transaction under 'Process
+
+capability Logger     @ 'Process     { fn info(msg: Str) }
+capability RequestCtx @ 'Request     { fn user_id() -> Uuid }
+capability DbTx       @ 'Transaction { fn execute(sql: Sql) raises {DbError} }
 
 fn record_visit()
     requires {Logger, RequestCtx, WriteDb}
@@ -21,24 +24,24 @@ fn record_visit()
 
     // DbTx is bound only inside this Transaction scope; its Lifecycle
     // issues BEGIN on entry and COMMIT (or ROLLBACK) on exit.
-    provide @ Transaction {
-        DbTx = PgTransaction(WriteDb.acquire()) @ Transaction
-    } in {
+    with [
+        DbTx <- PgTransaction { conn: WriteDb.acquire() }
+    ] @ 'Transaction {
         DbTx.execute(sql"INSERT INTO visits (uid) VALUES (${uid})")
     }
 }
 
 fn main() {
     // Process scope: bound once, lives for the program's lifetime.
-    provide {
-        Logger  = JsonLogger()           @ Process
-        WriteDb = Postgres("localhost")  @ Process
-    } in {
+    with [
+        Logger  <- JsonLogger
+        WriteDb <- Postgres { url: "localhost" }
+    ] @ 'Process {
         serve(8080, |req| {
             // Request scope: a fresh binding per incoming request.
-            provide @ Request {
-                RequestCtx = RequestCtx.fresh(req) @ Request
-            } in {
+            with [
+                RequestCtx <- RequestCtx.fresh(req)
+            ] @ 'Request {
                 record_visit()
             }
         })
@@ -46,13 +49,14 @@ fn main() {
 }
 ```
 
-One mechanism — `provide` — wires the database, the logger, the request context, the transaction, *and* the scheduler. The same code runs in production, in tests (with a deterministic runtime), and on restricted targets like the browser or embedded devices — the difference is just what gets bound at `main`.
+One mechanism, `with`, wires the database, the logger, the request context, the transaction, and the scheduler. The same code runs in production, in tests (with a deterministic runtime), and on restricted targets like the browser or embedded devices — the difference is just what gets bound at `main`.
 
-Dilang is at the **design stage**. The language is fully specified on paper; there is no compiler yet. The repository contains the design documents, illustrative example programs, and a Zed editor extension for syntax highlighting.
+Dilang is at the **design/prototype stage**. The repository contains the design documents, illustrative example programs, a small OCaml interpreter prototype, and a Zed editor extension for syntax highlighting.
 
 ## Repository layout
 
 - **[`docs/lang/`](./docs/lang/)** — the language. Start at [`docs/lang/README.md`](./docs/lang/README.md), which orders the reading: design → syntax → worked examples → decisions.
+- **[`dilang-interpreter/`](./dilang-interpreter/)** — an OCaml tree-walking interpreter prototype with file-backed stage fixtures and HTTP demos.
 - **[`playground/`](./playground/)** — small `.di` programs, one per concept (capabilities, errors, wiring composition, request scopes, middleware, streams, transactions, cancellation).
 - **[`dilang-zed/`](./dilang-zed/)** — Zed extension. Tree-sitter grammar plus highlight/indent/bracket queries. Highlights standalone `.di` files and ` ```di ` fenced code blocks in Markdown.
 
