@@ -144,3 +144,66 @@ Likely landing: a future typechecker can lift this from a runtime panic to a sta
 
 - Rejected: fan out to one-element-per-character — picks one of several conventions arbitrarily and contradicts the v0 decision to defer all char-level string operations.
 - Rejected: return the whole string as a single element (`["abc"]`) — equally arbitrary, and silently makes a likely-buggy call look successful.
+
+## DEC-017 — Function values display as `<closure>` / `<fn NAME>`
+Status: Active · Cites: syntax §1.2–1.3
+A function value passed to `print()` displays as a fixed marker rather than panicking: `VClosure` → `<closure>`, `VFn f` → `<fn NAME>` (e.g. `<fn foo>`).
+
+Stage 10 introduced first-class function values (lambdas and bare top-level fn names used as values). `print(f)` must produce *something*; panicking on a function value would lose a cheap debugging affordance. The marker is a display convention only — it implies no identity or equality semantics, and deliberately leaks none of the captured environment or capability stack (that would be noisy and a format we'd regret pinning).
+
+Interpreter (Stage 10): the two cases live in `Value.to_display` (`value.ml`); pinned by `test/stages/10_fn_value_display.di` (`<closure>` then `<fn foo>`).
+
+- Rejected: panic on a function value — loses a cheap debugging affordance for no benefit.
+- Rejected: include the captured env/caps in the display — noisy, and a format we'd be stuck supporting.
+
+## DEC-018 — Stdlib declarations injected via a parsed `.di` prelude (Stopgap)
+Status: Active (explicitly temporary) · Cites: interpreter.md "Stage 11", design §3 (modules/stdlib, not yet specified)
+The Stage 11 capability *interfaces* (`HttpServer`, `HttpClient`), data *types* (`Request`, `Response` structs), and the `HttpError` enum are declared in ordinary dilang source held in `lib/prelude.ml` and **prepended to the user program** before `build_tables` (`driver.ml run_program`). Only the host *impls* (`BlockingHttpServer` / `BlockingHttpClient`) stay as OCaml constructors. The prelude adds **no language surface**: it is parsed by the same `parse_string` and lowered through the same `build_tables` as user code, so `HttpServer`/`HttpClient` land in `cap_decls`/`ext_of`, `Request`/`Response` become `user_constructors`, and `HttpError` flows through the ordinary user-enum loop. Nothing in it is privileged (it defines none of the reserved names — `HttpError` ≠ `Option`).
+
+This is an **explicit stopgap** until a real module system + standard library exist; at that point these declarations move into an importable stdlib module and the prelude file disappears. Documented in `lib/prelude.ml`'s header.
+
+- Rejected: inject the types as OCaml `Ast` values directly — duplicates `build_tables` logic, risks a parallel code path drifting from the parser, and reads less like "this is just dilang."
+- Rejected: hard-code `Request`/`Response`/`HttpError` as new `VVariant`/native values — bakes a not-yet-designed stdlib shape into the interpreter core; harder to revise than text.
+- Rejected: require users to declare the HTTP types themselves — every HTTP program would repeat boilerplate the language is supposed to provide.
+
+## DEC-019 — HTTP v0 representation: no headers; no auto-`BadStatus`
+Status: Active · Cites: interpreter.md "Stage 11"
+Stage 11's HTTP types are `Request { method, path, body }` and `Response { status, body }` — **no headers**. dilang has no tuple/`VTuple` (or map) value, so there is no ergonomic way to carry a `(name, value)` header collection yet; headers wait for a richer value model. Additionally, the client does **not** auto-raise `HttpError.BadStatus` on responses with status ≥ 400 in v0 — every response is returned as a `Response` regardless of status (the `BadStatus(code)` variant exists for callers and future use). `HttpError` is raised only for transport-level failures: `InvalidUrl` (unparseable `http://host[:port]/path`) and `ConnectionFailed(reason)` (resolve/connect failure).
+
+- Rejected: encode headers as parallel `Str` arrays or a `key=value` blob — picks an arbitrary shape we'd be stuck supporting; better to wait for tuples/maps.
+- Rejected: auto-raise `BadStatus` on ≥400 — conflates "the request completed and the server answered" with "the transport failed"; callers that want status-based control flow can branch on `resp.status`.
+
+## DEC-020 — Value-method dispatch on `VImpl`; method/field disambiguation follows Rust
+Status: Active · Cites: syntax §4 ("Calling methods vs. field-held closures"), §Arrays ("Method dispatch")
+`recv.name(args)` on a user struct / host impl value resolves `name` against the impl's methods (`iv.methods`). User methods run with `self` bound to the receiver and the **caller's** caps (`ctx.caps`) — deliberately *unlike* capability dispatch (`cap_call`), which uses the impl's captured `cap_env`, because a plain struct value was never wired through `provide`. Method/field naming follows Rust: `s.f(args)` is **always** an impl-block method; a field of function type is invoked with the parenthesised call form `(s.f)(args)` (a `FieldGet` yielding the function value, then a general call). The two syntaxes are distinct, so there is no runtime precedence to resolve and a same-name field+method is permitted (separate namespaces).
+
+Before this, `value_method_dispatch` handled only `[T]` and `Str`; any `VImpl` fell through to *"method … not supported on this value."* — user-struct/impl methods were reachable only through capability dispatch. This unblocks Milestone 11.5's router (`(r.handler)(req)`) and the eventual reshaping of `HttpServer` from a capability into a value.
+
+Interpreter: a `VImpl` arm in `value_method_dispatch` (`eval.ml`) — `DUser m` calls the shared `call_impl_method ctx iv m … ~caps:ctx.caps ~bind_self:true`; `DHost f` calls the host fn. A missing method whose name matches a field errors with *"field f on T is not a method; call it as (x.f)(...)"*; otherwise *"no method f on T"*. The general call form `(expr)(args)` is a new `atom`/`head_atom` production; the parser default-shifts the `IDENT . LPAREN` and `x . f . LPAREN` overlaps so `print(x)` / `Some(1)` keep their special rules and `x.f()` stays a method call. Pinned by `test/stages/vm_*.di` and `test/run_test.ml`'s `errors/field_not_method` + `no_method_on_struct`.
+
+- Rejected: make `s.f(args)` fall back to calling a field-held function when no method `f` exists — reintroduces the runtime precedence the Rust rule removes; a rename that turns a method into a field (or vice versa) would silently keep type-checking.
+- Rejected: dispatch user value-methods with the impl's captured `cap_env` (mirroring `cap_call`) — a plain `let p = Point{…}` value was never wired through `provide`, so its `cap_env` is empty; using it would make a method that calls a capability fail even when the caller has that capability in scope.
+
+## DEC-021 — Short-circuit `&&` / `||`
+Status: Active · Cites: syntax §1 ("Operators")
+Logical `&&` and `||` evaluate the right operand only when the left does not decide the result; both operands must be `Bool`. Precedence: looser than `??`/comparisons, with `&&` binding tighter than `||` (`%left BARBAR` then `%left AMPAMP`). They are dedicated AST nodes (`And`/`Or`), **not** `bin_op` variants, because `eval_binop` takes both operands already evaluated — short-circuiting requires deciding whether to evaluate the right operand from the left's value.
+
+`||` lexes as a single `BARBAR` token, shared between the operator and the zero-arg lambda `||body` (parsed by a `BARBAR`-prefixed lambda rule); the spaced `| |body` still lexes as two `PIPE`s (empty param list), so both spellings of the zero-arg lambda survive.
+
+Interpreter: `And`/`Or` arms in `eval.ml` (before the eager `BinOp` arm); non-`Bool` operands raise *"&& operands not Bool"* / *"|| operands not Bool"*. Pinned by `test/stages/vm_short_circuit.di` (side-effect ordering proves the RHS is skipped) and `errors/and_non_bool`.
+
+- Rejected: desugar to nested `if` in the parser — obscures the operator at the AST level and complicates the router's match condition; dedicated nodes are clearer.
+- Rejected: add `And`/`Or` to `bin_op` and special-case them in `eval_binop` — `eval_binop` receives pre-evaluated operands, so it structurally cannot short-circuit; the special case would have to live in the `BinOp` eval arm anyway.
+- Rejected: lex `||` as two `PIPE`s (no `BARBAR`) — then the or-operator and the spaced zero-arg lambda are indistinguishable to the parser.
+
+## DEC-022 — Inherent impls (`impl Type { ... }`)
+Status: Active · Cites: syntax §4.2, design §2.7 (capabilities vs traits, DEC-008)
+A type's own methods are declared with a bare `impl Type { fn ... }` — no capability or trait interface, no `for`. They are reached by receiver through value-method dispatch (DEC-020), never through `provide`. This is the Rust inherent-impl form, and it is the right shape for value types whose methods are intrinsic (a `Router`'s `dispatch`, a `Stack`'s `push`) rather than a named interface the type satisfies.
+
+Motivation: before this, every `impl` had to name a capability (`impl Cap for Type`), forcing value types to either declare a "marker capability" — semantically wrong, since the methods are receiver-resolved, not `provide`-resolved (DEC-008's trait side, which is not yet implemented) — or lean on an undeclared cap name (works, but unvalidated). An inherent impl says exactly what is meant. It is **orthogonal to traits**: when `trait` lands it will be the named-interface-resolved-by-receiver form; inherent impls are the no-interface form. Both compose with `impl Cap for Type` on the same type (methods merge; duplicate names across blocks are rejected by `methods_for_ty`).
+
+Interpreter: a second `decl` production `IMPL IDENT LBRACE ... RBRACE` (`parser.mly`) producing `DImpl { for_ty; caps = []; … }`. `caps`/`priv_requires` are never read at runtime — only `for_ty` (to index `impls_by_ty`) and `methods` — so an empty caps list needs no further plumbing. The parser disambiguates one token after `IMPL IDENT` (`LBRACE` → inherent; `FOR`/`PLUS` → `impl X for Y`); LR(1)-decidable, **zero** new conflicts. Pinned by `test/stages/vm_inherent_impl.di` and the `router_graceful` demo/test.
+
+- Rejected: require a marker capability on value types — implies `provide`-resolution that never happens; misleads the reader about how the methods are found.
+- Rejected: allow `impl Cap for Type` with `Cap` undeclared as the idiom — works only by absence of validation; a future "impl names a known interface" check would break it, and it still reads as if `Cap` means something.
+- Rejected: wait for `trait` and model these as traits — inherent (no-interface) methods and trait (named-interface) methods are distinct concepts; Rust keeps both, and the no-interface case is the common one for a program's own value types.

@@ -1,0 +1,2 @@
+left the with block
+captured logger still works

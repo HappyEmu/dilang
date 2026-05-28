@@ -78,7 +78,13 @@ let rec eval (ctx : ctx) = function
              | None ->
                 (match Hashtbl.find_opt ctx.host_constructors x with
                  | Some ctor -> VImpl (ctor [])
-                 | None      -> failwith ("unbound name: " ^ x)))))
+                 | None      ->
+                   (* Stage 10: a bare top-level fn name used as a value
+                      (`let f = foo`) resolves to a `VFn`. Locals already
+                      shadowed this via the `Env.lookup` above. *)
+                   (match Hashtbl.find_opt ctx.fns x with
+                    | Some f -> VFn f
+                    | None   -> failwith ("unbound name: " ^ x))))))
   | Let { name; mut; rhs; body } ->
       (* Stage 8 (D1): a local `let n = ...` may not shadow a declared
          capability — `MethodCall` routes by checking `ctx.cap_decls`, so a
@@ -101,6 +107,12 @@ let rec eval (ctx : ctx) = function
          fieldless), handled by Var/StructLit. Variant construction also
          flows through here: fns → variants → fail. *)
       let argv = List.map (eval ctx) args in
+      (* Stage 10: a local closure/fn-value bound by `let f = ...` lives in
+         `env` and must win over a same-named top-level fn (env-first
+         dispatch). Fall through to fns → variants otherwise. *)
+      (match Env.find_ref ctx.env name with
+       | Some (r, _) -> call_value ctx !r argv
+       | None ->
       (match Hashtbl.find_opt ctx.fns name with
        | Some f -> call_fn ctx f argv
        | None ->
@@ -113,9 +125,28 @@ let rec eval (ctx : ctx) = function
                     "variant %s expects %d argument(s), got %d"
                     name expected got);
                 VEnum { ty = enum_name; tag = name; payload = argv }
-            | None -> failwith ("unknown function: " ^ name)))
-  | Call _ ->
-      failwith "first-class function calls not supported in Stage 1"
+            | None -> failwith ("unknown function: " ^ name))))
+  | Call { fn; args } ->
+      (* Stage 10: general first-class call — evaluate the callee, dispatch on
+         the resulting value (closure / fn-value). *)
+      let callee = eval ctx fn in
+      let argv = List.map (eval ctx) args in
+      call_value ctx callee argv
+  (* DEC-021: short-circuit. The right operand is evaluated only when the left
+     doesn't decide the result; both operands must be Bool. Separate from
+     `BinOp` because `eval_binop` takes both operands pre-evaluated. *)
+  | And (a, b) ->
+      (match eval ctx a with
+       | VBool false -> VBool false
+       | VBool true  ->
+           (match eval ctx b with VBool _ as v -> v | _ -> type_err "&& operands not Bool")
+       | _ -> type_err "&& operands not Bool")
+  | Or (a, b) ->
+      (match eval ctx a with
+       | VBool true  -> VBool true
+       | VBool false ->
+           (match eval ctx b with VBool _ as v -> v | _ -> type_err "|| operands not Bool")
+       | _ -> type_err "|| operands not Bool")
   | BinOp (op, a, b) ->
       let va = eval ctx a in
       let vb = eval ctx b in
@@ -354,6 +385,28 @@ let rec eval (ctx : ctx) = function
             with Break_exn _ -> ());
            VUnit
        | _ -> type_err "for over non-array")
+  | Lambda { params; body } ->
+      (* Stage 10: capture the lexical env *and* the capability stack at the
+         point of definition (the load-bearing piece for Stage 11). *)
+      VClosure { params; body; env = ctx.env; caps = ctx.caps }
+
+and call_value (ctx : ctx) callee argv =
+  (* Stage 10: shared first-class invoke. Contrast with `call_fn` (which starts
+     from `Env.empty` and keeps the *caller's* caps): a closure starts from its
+     *captured* env and swaps in its *captured* caps. No defers handling here —
+     the body `Scope` owns them (Option A, DEC-012). *)
+  match callee with
+  | VClosure { params; body; env; caps } ->
+      if List.length params <> List.length argv then failwith "arity mismatch";
+      let env' = List.fold_left2
+        (fun e (p, _) v -> Env.extend e p v ~mut:false) env params argv in
+      let ctx' = { ctx with env = env'; caps } in
+      (try eval ctx' body with
+       | Return_exn v -> v
+       | Break_exn _  -> failwith "break outside any loop"
+       | Continue_exn -> failwith "continue outside any loop")
+  | VFn f -> call_fn ctx f argv
+  | _ -> failwith "call of non-function"
 
 and cap_call ctx cap method_ args =
   (* Stage 8 (D1): extracted from the old `CapCall` arm so `MethodCall` can
@@ -385,25 +438,32 @@ and cap_call ctx cap method_ args =
    | None              -> failwith ("capability " ^ cap ^ " has no method " ^ method_)
    | Some (DHost f)    -> f ctx arg_vs
    | Some (DUser m) ->
-       if List.length m.im_params <> List.length arg_vs then
-         failwith ("arity mismatch calling " ^ cap ^ "." ^ method_);
-       let env0 =
-         List.fold_left2
-           (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
-           Env.empty m.im_params arg_vs
-       in
-       let env_with_self =
-         if impl.fields = [] then env0
-         else Env.extend env0 "self" (VImpl impl) ~mut:false
-       in
-       let activation_ctx =
-         { ctx with env = env_with_self; caps = impl.cap_env }
-       in
-       try eval activation_ctx m.im_body
-       with
-       | Return_exn v -> v
-       | Break_exn _  -> failwith "break outside any loop"
-       | Continue_exn -> failwith "continue outside any loop")
+       call_impl_method ctx impl m arg_vs
+         ~caps:impl.cap_env ~bind_self:(impl.fields <> []))
+
+(* Run a user `impl` method `m` on `impl` with `arg_vs`. Shared by capability
+   dispatch (`cap_call`, with `~caps:impl.cap_env`) and value-method dispatch
+   (DEC-020, with `~caps:ctx.caps`). `~bind_self` binds `self` to the receiver
+   when set. Arity check, then eval the body with the usual activation-boundary
+   catches (Return / Break / Continue). *)
+and call_impl_method ctx impl (m : Ast.impl_method) arg_vs ~caps ~bind_self =
+  if List.length m.im_params <> List.length arg_vs then
+    failwith ("arity mismatch calling " ^ m.im_name);
+  let env0 =
+    List.fold_left2
+      (fun env (pname, _ty) v -> Env.extend env pname v ~mut:false)
+      Env.empty m.im_params arg_vs
+  in
+  let env_with_self =
+    if bind_self then Env.extend env0 "self" (VImpl impl) ~mut:false
+    else env0
+  in
+  let activation_ctx = { ctx with env = env_with_self; caps } in
+  (try eval activation_ctx m.im_body
+   with
+   | Return_exn v -> v
+   | Break_exn _  -> failwith "break outside any loop"
+   | Continue_exn -> failwith "continue outside any loop")
 
 and value_method_dispatch ctx v name args =
   (* Stage 8 (D1): runtime-type-driven method dispatch. Stage 9 will slot
@@ -449,6 +509,23 @@ and value_method_dispatch ctx v name args =
   | VStr _, ("contains"|"starts_with"|"ends_with"|"split"), _ ->
       failwith (name ^ "() takes exactly one argument")
   | VStr _, _, _ -> failwith ("unknown method on string: " ^ name)
+  (* DEC-020: value-method dispatch on a user struct / host impl value.
+     `recv.name(args)` resolves `name` against the impl's methods. User methods
+     run with `self` bound to the receiver and the *caller's* caps (`ctx.caps`)
+     — unlike `cap_call`, which uses the impl's captured `cap_env`, because a
+     plain struct value was never wired through `with`. A field holding a
+     function is NOT reachable here (Rust rule); call it as `(recv.field)(...)`. *)
+  | VImpl iv, _, _ ->
+      (match List.assoc_opt name iv.methods with
+       | Some (DUser m) ->
+           call_impl_method ctx iv m (List.map (eval ctx) args)
+             ~caps:ctx.caps ~bind_self:true
+       | Some (DHost f) -> f ctx (List.map (eval ctx) args)
+       | None ->
+           if List.mem_assoc name iv.fields
+           then failwith ("field " ^ name ^ " on " ^ iv.ty
+                          ^ " is not a method; call it as (x." ^ name ^ ")(...)")
+           else failwith ("no method " ^ name ^ " on " ^ iv.ty))
   | _ -> failwith ("method " ^ name ^ " not supported on this value")
 
 and call_fn (ctx : ctx) (f : fn_decl) args =

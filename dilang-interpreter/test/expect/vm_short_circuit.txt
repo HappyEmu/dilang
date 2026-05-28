@@ -1,0 +1,10 @@
+a
+false
+b
+true
+c
+d
+true
+e
+g
+false

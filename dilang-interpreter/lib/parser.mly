@@ -20,10 +20,14 @@ open Ast
 %token LBRACKET RBRACKET
 %token COMMA COLON ARROW AT DOT
 %token QMARK QMARK_QMARK QMARK_DOT
+%token PIPE
+%token AMPAMP BARBAR
 %token EOF
 
 %nonassoc RETURN
 %nonassoc DEFER
+%left BARBAR
+%left AMPAMP
 %right QMARK_QMARK
 %left EQEQ BANGEQ LT GT LEQ GEQ
 %left PLUS MINUS
@@ -42,10 +46,10 @@ expr_entry:
 
 decl:
   | FN; n = IDENT; LPAREN; ps = params; RPAREN;
-    r = ret_opt; raises_opt; req = requires_opt; b = block
+    r = ret_opt; req = requires_opt; raises_opt; b = block
     { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
   | FN; n = IDENT; LPAREN; ps = params; RPAREN;
-    r = ret_opt; raises_opt; req = requires_opt; EQ; b = expr
+    r = ret_opt; req = requires_opt; raises_opt; EQ; b = expr
     { DFn { name = n; params = ps; ret = r; requires = req; body = b } }
   | CAPABILITY; n = IDENT; sc = cap_scope_opt; ext = extends_opt; LBRACE; ms = list(cap_method); RBRACE
     { DCap { c_name = n; c_scope = sc; c_extends = ext; c_methods = ms } }
@@ -56,6 +60,14 @@ decl:
   | IMPL; cs = impl_caps; FOR; t = IDENT;
     LBRACE; req = impl_requires_opt; ms = list(impl_method); RBRACE
     { DImpl { for_ty = t; caps = cs; priv_requires = req; methods = ms } }
+  (* Inherent impl (DEC-022): `impl Type { fn ... }` — a type's own methods, no
+     capability/trait interface. `caps = []` (never read at runtime; only
+     `for_ty`/`methods` matter). The parser disambiguates one token after
+     `IMPL IDENT`: `LBRACE` → here; `FOR`/`PLUS` → the `impl X for Y` rule
+     above. LR(1)-decidable, so no conflict. *)
+  | IMPL; t = IDENT;
+    LBRACE; req = impl_requires_opt; ms = list(impl_method); RBRACE
+    { DImpl { for_ty = t; caps = []; priv_requires = req; methods = ms } }
   | ENUM; n = IDENT; ep = enum_params_opt; LBRACE; vs = enum_variants; RBRACE
     { DEnum { e_name = n; e_params = ep; e_variants = vs } }
 
@@ -117,6 +129,27 @@ impl_method:
 type_name:
   | t = IDENT                                    { t }
   | t = IDENT; QMARK                             { t ^ "?" }
+  (* Stage 10: function type in type position (`fn(T, ...) -> R`). Types are
+     erased at runtime, so we stringify-and-discard structurally — the result
+     is just a placeholder. Trailing `requires {...}` / `raises {...}` are NOT
+     accepted on the type itself: in the canonical example those clauses sit on
+     the enclosing `fn` decl, and accepting them here would add two shift/reduce
+     conflicts (inner-type vs outer-decl raises_opt/requires_opt). `fn` already
+     starts a top-level decl; this rule is the one plausible new conflict
+     source — see the Stage-10 report. *)
+  | FN; LPAREN; ts = type_list; RPAREN; ARROW; r = type_name
+    { "fn(" ^ String.concat ", " ts ^ ") -> " ^ r }
+  (* Array type `[T]` (docs §Arrays). Like every other type it is erased at
+     runtime — this just stringifies to a placeholder so `table: [Route]` and
+     other array-typed params/fields parse. `LBRACKET` in type position (after
+     `:` or `->`) is unambiguous, so this adds no conflict. *)
+  | LBRACKET; t = type_name; RBRACKET
+    { "[" ^ t ^ "]" }
+
+type_list:
+  |                                              { [] }
+  | t = type_name                                { [t] }
+  | t = type_name; COMMA; rest = type_list       { t :: rest }
 
 ret_opt:
   |                       { None }
@@ -146,6 +179,14 @@ params:
 
 param:
   | n = IDENT; COLON; t = type_name                 { (n, t) }
+
+(* Stage 10: lambda params; annotations optional (unlike `param`). *)
+lambda_params:
+  |                                                          { [] }
+  | n = IDENT                                                { [(n, None)] }
+  | n = IDENT; COLON; t = type_name                          { [(n, Some t)] }
+  | n = IDENT; COMMA; rest = lambda_params                   { (n, None) :: rest }
+  | n = IDENT; COLON; t = type_name; COMMA; rest = lambda_params  { (n, Some t) :: rest }
 
 block:
   (* Every surface `{ ... }` becomes a `Scope`, which is the defer-frame
@@ -212,6 +253,8 @@ expr:
         | Var v -> Raise { variant = v; payload = [] }
         | Call { fn = Var v; args } -> Raise { variant = v; payload = args }
         | _ -> failwith "raise expects a variant: `raise X` or `raise X(args)`" }
+  | l = expr; BARBAR; r = expr   { Or  (l, r) }
+  | l = expr; AMPAMP; r = expr   { And (l, r) }
   | l = expr; QMARK_QMARK; r = expr { NullCoalesce (l, r) }
   | l = expr; PLUS;   r = expr   { BinOp (Add, l, r) }
   | l = expr; MINUS;  r = expr   { BinOp (Sub, l, r) }
@@ -243,6 +286,12 @@ atom:
       { StructLit { ty = n; fields = fs } }
   | n = IDENT                                            { Var n }
   | n = IDENT; LPAREN; args = arglist; RPAREN            { Call { fn = Var n; args } }
+  (* General first-class call form so `(r.handler)(req)` and `(expr)(args)`
+     parse (eval already has the general `Call { fn; args }` arm). The special
+     `IDENT LPAREN` rule above routes bare names through eval's `Var name` arm
+     (fns / variants / `print`); on the `IDENT . LPAREN` overlap the default
+     shift resolves to that rule, preserving `print(x)` / `Some(1)`. *)
+  | a = atom; LPAREN; args = arglist; RPAREN             { Call { fn = a; args } }
   (* Stage 8: `[a, b, c]` array literal and `a[i]` indexed read. The
      `atom LBRACKET` form is left-recursive; default shift on LBRACKET wins,
      resolving `[1,2,3][0]` and `xs[0][1]` correctly. *)
@@ -259,6 +308,21 @@ atom:
   (* RFC-001 scoped wiring. Wiring values and spreads parse here, but remain
      Stage-9 runtime work. *)
   | w = with_caps_expr                                      { w }
+  (* Stage 10: lambda. The body is a single `expr`; a braced `{ ... }` body
+     reaches `Scope` through `expr -> atom -> block` (giving defer ownership
+     for free), and a bare-expr body extends maximally to the right. Zero-param
+     `|| ...` falls out as two adjacent PIPE tokens with an empty param list.
+     `|` was previously unused. (A separate `... PIPE block` production would be
+     redundant — `block` is a subset of `expr` — and introduces reduce/reduce.)
+     An optional return-type annotation `|x: I64| -> I64 ...` is accepted and
+     discarded (types are erased; no static checking this stage). ARROW cannot
+     begin an `expr`, so `ret_opt` here adds no conflict. *)
+  | PIPE; ps = lambda_params; PIPE; ret_opt; e = expr    { Lambda { params = ps; body = e } }
+  (* Zero-arg lambda written with adjacent bars: `||body` lexes as one BARBAR
+     (DEC-021). The spaced `| |body` still reaches the PIPE-PIPE rule above with
+     an empty param list. ARROW cannot begin an `expr`, so `ret_opt` adds no
+     conflict. *)
+  | BARBAR; ret_opt; e = expr                            { Lambda { params = []; body = e } }
 
 (* Stage 8: Rust-style restricted expression — used in the head position of
    `if` / `while` / `for ... in` (and `else if`) where a trailing `LBRACE`
@@ -274,6 +338,8 @@ head_expr:
         | Var v -> Raise { variant = v; payload = [] }
         | Call { fn = Var v; args } -> Raise { variant = v; payload = args }
         | _ -> failwith "raise expects a variant: `raise X` or `raise X(args)`" }
+  | l = head_expr; BARBAR; r = head_expr   { Or  (l, r) }
+  | l = head_expr; AMPAMP; r = head_expr   { And (l, r) }
   | l = head_expr; QMARK_QMARK; r = head_expr { NullCoalesce (l, r) }
   | l = head_expr; PLUS;   r = head_expr   { BinOp (Add, l, r) }
   | l = head_expr; MINUS;  r = head_expr   { BinOp (Sub, l, r) }
@@ -299,6 +365,9 @@ head_atom:
         | Some args -> MethodCall { target = a; name = m; args } }
   | n = IDENT                                                { Var n }
   | n = IDENT; LPAREN; args = arglist; RPAREN                { Call { fn = Var n; args } }
+  (* General call form — `(r.handler)(req)` in an `if` condition is a
+     `head_expr` (see the `atom` twin for the IDENT-overlap note). *)
+  | a = head_atom; LPAREN; args = arglist; RPAREN            { Call { fn = a; args } }
   | LBRACKET; xs = arglist; RBRACKET                         { ArrayLit xs }
   | a = head_atom; LBRACKET; i = expr; RBRACKET              { Index { target = a; idx = i } }
   | LPAREN; e = expr; RPAREN                                 { e }

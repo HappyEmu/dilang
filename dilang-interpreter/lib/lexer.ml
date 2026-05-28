@@ -105,6 +105,8 @@ let rec token buf =
   | "..."  -> ELLIPSIS
   | "->"   -> ARROW
   | "<-"   -> LARROW
+  | "&&"   -> AMPAMP
+  | "||"   -> BARBAR
   | "=="   -> EQEQ
   | "!="   -> BANGEQ
   | "<="   -> LEQ
@@ -129,6 +131,13 @@ let rec token buf =
   | ':'    -> COLON
   | '@'    -> AT
   | '.'    -> DOT
+  (* `||` lexes as a single BARBAR (DEC-021), used both for the logical-or
+     operator and for the zero-arg lambda `||body` (adjacent bars, parsed via
+     a dedicated BARBAR-prefixed lambda rule). The bare `|` stays PIPE, so the
+     spaced `| |body` still lexes as two PIPEs (empty param list). The `&&`/`||`
+     rules above sit before the single-char rules; sedlex longest-match takes
+     them when both bars/amps are adjacent. *)
+  | '|'    -> PIPE
   | eof    -> EOF
   | _      ->
       let s = Sedlexing.Utf8.lexeme buf in

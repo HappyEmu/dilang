@@ -10,6 +10,15 @@ type value =
      array (both names see the same growth) because the value carries the
      same `ref`. *)
   | VArray of value array ref
+  (* Stage 10: first-class closures. Captures both the lexical `env` *and* the
+     capability stack `caps` at definition time, so a closure built inside a
+     `with [ ... ] { ... }` still resolves its capabilities when invoked
+     after that block has exited. Effect rows are not tracked this stage. *)
+  | VClosure of { params : (Ast.ident * Ast.type_name option) list;
+                  body   : Ast.expr;
+                  env    : env;
+                  caps   : cap_frame list }
+  | VFn of Ast.fn_decl
 
 and impl_value = {
   ty      : Ast.type_name;
@@ -43,6 +52,15 @@ and ctx = {
   env               : env;
   fns               : (Ast.ident, Ast.fn_decl) Hashtbl.t;
   sink              : sink;
+  (* Stage 11: the Eio network from `Eio.Stdenv.net env`, threaded from
+     `run_file` so host impls (`BlockingHttpServer`/`BlockingHttpClient`) can
+     listen/connect. The per-`with` switch they use is read off
+     `(List.hd ctx.caps).switch`, not stored here. *)
+  net               : [`Generic] Eio.Net.ty Eio.Resource.t;
+  (* Stage 11: bounds the server accept loop (`Some n` → serve n requests then
+     return; `None` → loop forever). Set only by the interpreter (CLI
+     `--max-requests` / test fixtures); never reachable from user code. *)
+  max_requests      : int option;
   caps              : cap_frame list;                                       (* innermost first *)
   cap_decls         : (Ast.ident, Ast.cap_decl) Hashtbl.t;
   host_constructors : (Ast.ident, (Ast.ident * value) list -> impl_value) Hashtbl.t;
@@ -76,3 +94,7 @@ let rec to_display = function
       tag ^ "(" ^ String.concat ", " (List.map to_display payload) ^ ")"
   | VArray a ->
       "[" ^ String.concat ", " (Array.to_list (Array.map to_display !a)) ^ "]"
+  (* DEC-017: function values display as a fixed marker — no captured env/caps
+     leaked, no identity/equality semantics implied. *)
+  | VClosure _ -> "<closure>"
+  | VFn f      -> "<fn " ^ f.name ^ ">"
