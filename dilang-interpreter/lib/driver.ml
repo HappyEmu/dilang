@@ -104,7 +104,15 @@ let format_payload (vs : Value.value list) =
   | [] -> ""
   | _  -> "(" ^ String.concat ", " (List.map Value.to_display vs) ^ ")"
 
-let run_program ?(sink = Value.OutChan stdout) prog =
+let run_program ?(sink = Value.OutChan stdout) ?max_requests ~net prog =
+  (* Stage 11 (DEC-018): prepend the parsed stdlib prelude — capability
+     interfaces (HttpServer/HttpClient), data structs (Request/Response), and
+     the HttpError enum — ahead of the user program. It is ordinary dilang
+     source parsed by the same path; `build_tables` sees one flat decl list, so
+     the prelude decls land in the same tables as user decls. A temporary
+     stopgap until a module system + stdlib exist. *)
+  let prelude = parse_string Prelude.source in
+  let prog = prelude @ prog in
   let fns, cap_decls, struct_decls, impls_by_ty, user_enums = build_tables prog in
   let main =
     match Hashtbl.find_opt fns "main" with
@@ -124,6 +132,8 @@ let run_program ?(sink = Value.OutChan stdout) prog =
     env  = Env.empty;
     fns;
     sink;
+    net;
+    max_requests;
     caps = [];
     cap_decls;
     host_constructors;
@@ -157,17 +167,19 @@ let run_program ?(sink = Value.OutChan stdout) prog =
   with Eval.Dilang_error { tag; payload } ->
     failwith ("uncaught raise: " ^ tag ^ format_payload payload)
 
-let run_file ?(sink = Value.OutChan stdout) path =
-  Eio_main.run @@ fun _env ->
+let run_file ?(sink = Value.OutChan stdout) ?max_requests path =
+  Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun _sw ->
+  let net = (Eio.Stdenv.net env :> [`Generic] Eio.Net.ty Eio.Resource.t) in
   let prog = parse_file path in
-  run_program ~sink prog
+  run_program ~sink ?max_requests ~net prog
 
 let run_file_to_buffer path buf =
   run_file ~sink:(Value.Buf buf) path
 
 let run_string_to_buffer src buf =
-  Eio_main.run @@ fun _env ->
+  Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun _sw ->
+  let net = (Eio.Stdenv.net env :> [`Generic] Eio.Net.ty Eio.Resource.t) in
   let prog = parse_string src in
-  run_program ~sink:(Value.Buf buf) prog
+  run_program ~sink:(Value.Buf buf) ~net prog

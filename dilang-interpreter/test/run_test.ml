@@ -837,6 +837,262 @@ let neg_call_non_function () =
          \    print(x(1))\n\
          }\n")
 
+(* --- value-method dispatch / logical-op negatives (DEC-020, DEC-021) ---- *)
+
+let neg_field_not_method () =
+  (* `b.f(args)` on a field holding a closure is a method call, not a
+     field-then-call; the error hints at the parenthesised form. *)
+  check_raises_substr "field not method"
+    "field f on Box is not a method; call it as (x.f)(...)"
+    (fun () ->
+      run_string
+        "struct Box { f: fn(I64) -> I64 }\n\
+         fn main() {\n\
+         \    let b = Box { f: |n| n + 1 }\n\
+         \    print(b.f(21))\n\
+         }\n")
+
+let neg_no_method_on_struct () =
+  check_raises_substr "no method on struct" "no method bogus on Point"
+    (fun () ->
+      run_string
+        "struct Point { x: I64 }\n\
+         fn main() {\n\
+         \    let p = Point { x: 1 }\n\
+         \    print(p.bogus())\n\
+         }\n")
+
+let neg_and_non_bool () =
+  check_raises_substr "&& non-bool" "&& operands not Bool"
+    (fun () ->
+      run_string "fn main() { print(1 && true) }\n")
+
+(* --- Stage 11: out-of-process HTTP fixtures ----------------------------- *)
+
+(* The in-process `stage_test` / `run_string` harness can't host a server: it
+   would have to nest `Eio_main.run` inside its own, and a `serve` loop binds a
+   real port and blocks. So these tests `fork`: the child runs the dilang server
+   (its own `Eio_main.run` via `Driver.run_file`), the parent drives it over raw
+   `Unix` sockets, and `--max-requests` guarantees the child exits on its own. *)
+
+(* `waitpid` can be interrupted by a signal (EINTR) — retry until the child is
+   actually reaped. *)
+let rec waitpid_eintr pid =
+  match Unix.waitpid [] pid with
+  | result -> result
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> waitpid_eintr pid
+
+let str_contains hay needle =
+  try ignore (Str.search_forward (Str.regexp_string needle) hay 0); true
+  with Not_found -> false
+
+(* Retry the TCP connect (not a malformed probe — nothing is sent until the
+   connect succeeds) until the child's listener is up. *)
+let connect_retry ~port ~attempts =
+  let addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
+  let rec go n =
+    let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    match Unix.connect sock addr with
+    | () -> sock
+    | exception Unix.Unix_error _ ->
+        Unix.close sock;
+        if n <= 0 then failwith "HTTP fixture: server never came up"
+        else (Unix.sleepf 0.02; go (n - 1))
+  in
+  go attempts
+
+let http_send_raw ~port ~req =
+  let sock = connect_retry ~port ~attempts:200 in
+  ignore (Unix.write_substring sock req 0 (String.length req));
+  let buf = Buffer.create 256 in
+  let bytes = Bytes.create 4096 in
+  let rec read () =
+    let n = Unix.read sock bytes 0 4096 in
+    if n > 0 then (Buffer.add_subbytes buf bytes 0 n; read ())
+  in
+  (try read () with _ -> ());
+  Unix.close sock;
+  Buffer.contents buf
+
+let http_get_raw ~port ~path =
+  http_send_raw ~port
+    ~req:(Printf.sprintf
+            "GET %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" path)
+
+(* POST with a Content-Length body — the request codec reads a request body only
+   when Content-Length is present (the GET-deadlock fix, http_codec.ml). *)
+let http_post_raw ~port ~path ~body =
+  http_send_raw ~port
+    ~req:(Printf.sprintf
+            "POST %s HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
+            path (String.length body) body)
+
+(* Fork a dilang server at `prog` (path relative to the test cwd), run `f ()` in
+   the parent while it serves, then `waitpid` and return (exit status, child
+   stdout, f's result). The child's stdout is piped back so the handler's log
+   lines can be asserted (the capability-swap proof). *)
+let with_server ~prog ~max_requests f =
+  let (rd, wr) = Unix.pipe () in
+  match Unix.fork () with
+  | 0 ->
+      Unix.close rd;
+      Unix.dup2 wr Unix.stdout;
+      Unix.close wr;
+      let code =
+        try Dilang.Driver.run_file ~max_requests prog; 0
+        with _ -> 1
+      in
+      (try flush Stdlib.stdout with _ -> ());
+      Unix._exit code
+  | pid ->
+      Unix.close wr;
+      let result =
+        try f ()
+        with e -> (try Unix.close rd with _ -> ()); ignore (waitpid_eintr pid); raise e
+      in
+      let (_, status) = waitpid_eintr pid in
+      let ic = Unix.in_channel_of_descr rd in
+      let logs = In_channel.input_all ic in
+      close_in ic;
+      (status, logs, result)
+
+let with_http_server ~service ~max_requests f =
+  with_server ~prog:("programs/http_hello/" ^ service) ~max_requests f
+
+let check_clean_exit = function
+  | Unix.WEXITED 0 -> ()
+  | Unix.WEXITED n -> Alcotest.failf "server child exited with code %d" n
+  | _              -> Alcotest.fail "server child terminated abnormally"
+
+let http_server_responds () =
+  let port = 18080 in
+  let (status, logs, responses) =
+    with_http_server ~service:"service.di" ~max_requests:2 (fun () ->
+      let r1 = http_get_raw ~port ~path:"/health" in
+      let r2 = http_get_raw ~port ~path:"/status" in
+      [r1; r2])
+  in
+  check_clean_exit status;
+  List.iter (fun resp ->
+    Alcotest.(check bool) "200 status line" true (str_contains resp "HTTP/1.1 200 OK");
+    Alcotest.(check bool) "ok body"         true (str_contains resp "ok")) responses;
+  (* Handler ran behind the captured Logger capability — proof the closure's
+     caps resolved across the OCaml host call boundary in serve. *)
+  Alcotest.(check bool) "logged /health" true (str_contains logs "handling /health");
+  Alcotest.(check bool) "logged /status" true (str_contains logs "handling /status")
+
+let http_server_capability_swap () =
+  (* Same handler as service.di; only the Logger binding differs. The prefix in
+     the log proves the swap took effect with no handler edit. *)
+  let port = 18080 in
+  let (status, logs, _) =
+    with_http_server ~service:"service_prefixed.di" ~max_requests:1 (fun () ->
+      [http_get_raw ~port ~path:"/health"])
+  in
+  check_clean_exit status;
+  Alcotest.(check bool) "prefixed log line" true
+    (str_contains logs "[svc] handling /health")
+
+let http_client_roundtrip () =
+  (* A dilang HttpClient program (run in the parent, its own Eio_main.run) hits
+     the forked server. Request 1 is a raw probe (also the readiness wait);
+     request 2 is the dilang client. *)
+  let port = 18080 in
+  let client_src =
+    "fn main() {\n\
+    \    provide { HttpClient = BlockingHttpClient @ Process } in {\n\
+    \        let resp = HttpClient.get(\"http://localhost:18080/ping\")\n\
+    \        print(resp.status)\n\
+    \        print(resp.body)\n\
+    \    }\n\
+    }\n"
+  in
+  let (status, _logs, out) =
+    with_http_server ~service:"service.di" ~max_requests:2 (fun () ->
+      let _ = http_get_raw ~port ~path:"/__probe" in   (* readiness + request 1 *)
+      run_string client_src)                            (* request 2 *)
+  in
+  check_clean_exit status;
+  Alcotest.(check string) "client round-trip" "200\nok\n" out
+
+let http_client_invalid_url () =
+  check_raises_substr "invalid url" "uncaught raise: InvalidUrl"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+        \    provide { HttpClient = BlockingHttpClient @ Process } in {\n\
+        \        let _r = HttpClient.get(\"not a url\")\n\
+        \    }\n\
+        }\n")
+
+let http_client_connection_failed () =
+  (* Nothing listens on 18081 → connect refused → ConnectionFailed. *)
+  check_raises_substr "connection failed" "uncaught raise: ConnectionFailed"
+    (fun () ->
+      run_string
+        "fn main() {\n\
+        \    provide { HttpClient = BlockingHttpClient @ Process } in {\n\
+        \        let _r = HttpClient.get(\"http://localhost:18081/x\")\n\
+        \    }\n\
+        }\n")
+
+(* --- Milestone 11.5: route-table demo (DEC-020 + DEC-021) --------------- *)
+
+(* Drives `programs/router/service.di` over four requests: matched GET, matched
+   POST (body echoed), an unknown path, and a wrong method on a known prefix.
+   The last two prove the route loop falls through to the 404 (the `&&`
+   method+prefix match short-circuits). The first GET also serves as readiness.
+   `(r.handler)(req)` (value-method dispatch on the field-held fn) runs the
+   matched handler. The handler logs `"${method} ${path}"` for each request. *)
+let router_demo () =
+  let port = 18080 in
+  let (status, logs, (health, echo, unknown, wrongm)) =
+    with_server ~prog:"programs/router/service.di" ~max_requests:4 (fun () ->
+      let health  = http_get_raw  ~port ~path:"/health" in
+      let echo    = http_post_raw ~port ~path:"/echo" ~body:"pong" in
+      let unknown = http_get_raw  ~port ~path:"/nope" in
+      let wrongm  = http_post_raw ~port ~path:"/health" ~body:"x" in
+      (health, echo, unknown, wrongm))
+  in
+  check_clean_exit status;
+  Alcotest.(check bool) "health 200" true (str_contains health "HTTP/1.1 200 OK");
+  Alcotest.(check bool) "health body ok" true (str_contains health "ok");
+  Alcotest.(check bool) "echo 200" true (str_contains echo "HTTP/1.1 200 OK");
+  Alcotest.(check bool) "echo body echoed" true (str_contains echo "pong");
+  Alcotest.(check bool) "unknown 404" true (str_contains unknown "HTTP/1.1 404");
+  Alcotest.(check bool) "unknown body" true (str_contains unknown "no route");
+  Alcotest.(check bool) "wrong method 404" true (str_contains wrongm "HTTP/1.1 404");
+  Alcotest.(check bool) "wrong method body" true (str_contains wrongm "no route");
+  (* The handler ran behind the captured Logger across the host call boundary. *)
+  Alcotest.(check bool) "logged GET /health" true (str_contains logs "GET /health");
+  Alcotest.(check bool) "logged POST /echo"  true (str_contains logs "POST /echo")
+
+(* The graceful-shutdown demo: a `Router` STRUCT whose `.get`/`.post`/`.dispatch`
+   are inherent-impl methods (DEC-022) reached via value dispatch (DEC-020), with
+   a chained builder, per-request `defer`, and the bounded loop standing in for
+   shutdown. Drives a matched GET (root catch-all), a matched POST echo, and a
+   POST to an unbound path (404). Asserts the lifecycle log lines, including the
+   `provide`-block shutdown defer that fires after the accept loop returns. *)
+let router_graceful () =
+  let port = 18080 in
+  let (status, logs, (root, echo, miss)) =
+    with_server ~prog:"programs/router/graceful.di" ~max_requests:3 (fun () ->
+      let root = http_get_raw  ~port ~path:"/" in
+      let echo = http_post_raw ~port ~path:"/echo" ~body:"pong" in
+      let miss = http_post_raw ~port ~path:"/missing" ~body:"x" in
+      (root, echo, miss))
+  in
+  check_clean_exit status;
+  Alcotest.(check bool) "root 200" true (str_contains root "HTTP/1.1 200 OK");
+  Alcotest.(check bool) "root body" true (str_contains root "Hello, world!");
+  Alcotest.(check bool) "echo body echoed" true (str_contains echo "pong");
+  Alcotest.(check bool) "unbound POST 404" true (str_contains miss "HTTP/1.1 404");
+  Alcotest.(check bool) "unbound body" true (str_contains miss "no route");
+  (* Deterministic teardown: per-request defer + provide-block shutdown defer. *)
+  Alcotest.(check bool) "listening logged"  true (str_contains logs "listening on 18080");
+  Alcotest.(check bool) "per-req close defer" true (str_contains logs "closed GET /");
+  Alcotest.(check bool) "shutdown defer" true (str_contains logs "server shut down")
+
 let () =
   Alcotest.run "dilang-stages"
     [ "stage1",
@@ -919,6 +1175,22 @@ let () =
       ; Alcotest.test_case "10_local_shadows_fn"      `Quick (stage_test ~name:"10_local_shadows_fn")
       ; Alcotest.test_case "10_fn_value_display"      `Quick (stage_test ~name:"10_fn_value_display")
       ]
+    ; "stage11",
+      [ Alcotest.test_case "http_server_responds"      `Quick http_server_responds
+      ; Alcotest.test_case "http_capability_swap"      `Quick http_server_capability_swap
+      ; Alcotest.test_case "http_client_roundtrip"     `Quick http_client_roundtrip
+      ; Alcotest.test_case "http_client_invalid_url"   `Quick http_client_invalid_url
+      ; Alcotest.test_case "http_client_connection_failed" `Quick http_client_connection_failed
+      ]
+    ; "valuemethod",
+      [ Alcotest.test_case "vm_struct_method"    `Quick (stage_test ~name:"vm_struct_method")
+      ; Alcotest.test_case "vm_field_closure"    `Quick (stage_test ~name:"vm_field_closure")
+      ; Alcotest.test_case "vm_method_calls_cap" `Quick (stage_test ~name:"vm_method_calls_cap")
+      ; Alcotest.test_case "vm_short_circuit"    `Quick (stage_test ~name:"vm_short_circuit")
+      ; Alcotest.test_case "vm_inherent_impl"    `Quick (stage_test ~name:"vm_inherent_impl")
+      ; Alcotest.test_case "router_demo"         `Quick router_demo
+      ; Alcotest.test_case "router_graceful"     `Quick router_graceful
+      ]
     ; "stress",
       [ Alcotest.test_case "long_block_500"        `Quick stress_long_block
       ; Alcotest.test_case "deep_addition_200"     `Quick stress_deep_addition
@@ -979,5 +1251,8 @@ let () =
       ; Alcotest.test_case "cap_shadow"            `Quick neg_cap_shadow
       ; Alcotest.test_case "closure_arity"         `Quick neg_closure_arity
       ; Alcotest.test_case "call_non_function"     `Quick neg_call_non_function
+      ; Alcotest.test_case "field_not_method"      `Quick neg_field_not_method
+      ; Alcotest.test_case "no_method_on_struct"   `Quick neg_no_method_on_struct
+      ; Alcotest.test_case "and_non_bool"          `Quick neg_and_non_bool
       ]
     ]

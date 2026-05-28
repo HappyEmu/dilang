@@ -75,6 +75,30 @@ Closures infer rows from their bodies. When stored or passed, the inferred rows 
 
 -----
 
+## Operators
+
+### Logical `&&` / `||`
+
+`&&` and `||` short-circuit: the right operand is evaluated only when the left does not already decide the result. Both operands must be `Bool` (see DEC-021).
+
+```di
+if req.method == "GET" && req.path.starts_with("/health") { ... }
+let ok = cache_hit() || fetch_remote()    // fetch_remote() runs only on a miss
+```
+
+Precedence, loosest to tightest: `||`, then `&&`, then `??`, then the comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`), then `+`/`-`, then `*`/`/`. So `a || b && c` parses as `a || (b && c)`, and `x == y && z` as `(x == y) && z`.
+
+### Calls
+
+A call is `callee(args)`. The callee is usually a name (`foo(x)`, `Some(1)`), but any parenthesised expression that evaluates to a function value can be called directly:
+
+```di
+(make_adder(3))(4)        // call the returned closure
+(route.handler)(req)      // call a function held in a struct field — see §4
+```
+
+-----
+
 ## 2. Capabilities
 
 ### 2.1 Declarations
@@ -206,6 +230,24 @@ impl[<generics>] Cap1 [+ Cap2] for Type[<generics>] [where bounds] {
 }
 ```
 
+An **inherent impl** declares a type's own methods with no capability or trait interface — written `impl Type { ... }` (no `for`). These are the methods that belong to the value itself, reached by receiver (value-method dispatch, DEC-020), never through a `provide` block. See DEC-022.
+
+```di
+struct Router { routes: [Route] }
+
+impl Router {
+    fn get(prefix: Str, handler: fn(Request) -> Response) -> Router {
+        self.routes.push(Route { method: "GET", prefix, handler })
+        self                                   // return self → calls chain
+    }
+    fn dispatch(req: Request) -> Response { /* ... */ }
+}
+
+let r = Router { routes: [] }.get("/", hello).get("/time", now)
+```
+
+Use an inherent impl when the methods are intrinsic to the type (a `Router`'s `dispatch`); use `impl Cap for Type` when the type is *satisfying a named interface* — a capability bound through `provide`, or (once traits land) a trait resolved by receiver. The two forms compose: a type may have an inherent impl and one or more `impl Cap for Type` blocks; their methods merge (duplicate names across blocks are rejected).
+
 ### 4.3 Impl-private requires
 
 An impl may declare a private `requires` row — capabilities it needs internally that callers do not see.
@@ -243,6 +285,24 @@ impl<K, V> Cache<K, V> for LruCache<K, V>
     where K: Eq + Hash
 { /* ... */ }
 ```
+
+### 4.6 Calling methods vs. field-held closures
+
+`s.method(args)` always dispatches to a method defined in an `impl` block for the receiver's type — never to a field. A field that *holds* a function value is a separate namespace and is invoked with the parenthesised call form `(s.field)(args)`: `s.field` reads the function value, then `(...)(args)` calls it. This mirrors Rust and means a struct may carry a field and a method of the same name without ambiguity (see DEC-020).
+
+```di
+struct Route { handler: fn(Request) -> Response }
+
+impl Describe for Route {
+    fn handler() -> Str { "route" }       // a method named `handler`
+}
+
+let r = Route { handler: health }
+r.handler()        // the impl method → "route"
+(r.handler)(req)   // the field-held function, applied to req
+```
+
+Value-method calls run with `self` bound to the receiver and the **caller's** capabilities in scope — a struct method that calls a capability resolves it against the `provide` stack active at the call site, not at construction.
 
 -----
 
@@ -466,6 +526,8 @@ print(xs.len())                           // 3
 xs.push(4)
 print(xs[3])                              // 4
 ```
+
+This same value-method dispatch (resolution by the runtime type of the receiver, not through a `provide` block) now also covers user-struct `impl` methods — `point.dist()` calls a method from an `impl … for Point` block — not just the built-in `[T]` and `Str` methods. See §4.6 and DEC-020.
 
 Iteration uses `for x in xs { ... }`. The loop var is immutable per iteration; `break` and `continue` work the same as in `while`. Per DEC-013 `for` is a statement, not an expression — it always evaluates to `()`. Mutating `xs[i] = v` and `xs.push(v)` work in v0 even when `xs` is bound with plain `let`; DEC-015 will eventually require `let mut`.
 

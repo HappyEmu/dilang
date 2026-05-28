@@ -18,6 +18,12 @@ type expr =
   | Block of expr list
   | Call of { fn : expr; args : expr list }
   | BinOp of bin_op * expr * expr
+  (* Short-circuiting logical operators (DEC-021). Kept as dedicated nodes
+     rather than `bin_op` variants because `eval_binop` takes both operands
+     already evaluated — `&&`/`||` must decide whether to evaluate the right
+     operand based on the left, so they need their own eval arms. *)
+  | And of expr * expr
+  | Or  of expr * expr
   | Return of expr
   | StringInterp of string_part list
   (* Stage 8 (D1): unified dotted-call form. Eval routes to capability dispatch

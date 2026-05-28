@@ -52,6 +52,15 @@ and ctx = {
   env               : env;
   fns               : (Ast.ident, Ast.fn_decl) Hashtbl.t;
   sink              : sink;
+  (* Stage 11: the Eio network from `Eio.Stdenv.net env`, threaded from
+     `run_file` so host impls (`BlockingHttpServer`/`BlockingHttpClient`) can
+     listen/connect. The per-`provide` switch they use is read off
+     `(List.hd ctx.caps).switch`, not stored here. *)
+  net               : [`Generic] Eio.Net.ty Eio.Resource.t;
+  (* Stage 11: bounds the server accept loop (`Some n` → serve n requests then
+     return; `None` → loop forever). Set only by the interpreter (CLI
+     `--max-requests` / test fixtures); never reachable from user code. *)
+  max_requests      : int option;
   caps              : cap_frame list;                                       (* innermost first *)
   cap_decls         : (Ast.ident, Ast.cap_decl) Hashtbl.t;
   host_constructors : (Ast.ident, (Ast.ident * value) list -> impl_value) Hashtbl.t;

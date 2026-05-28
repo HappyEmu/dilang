@@ -1,201 +1,202 @@
-# Handoff: Stage 9 of the Dilang interpreter
+# Handoff: after value-method dispatch on `VImpl` (post-Stage-11)
 
-This is a **knowledge handover**, not a plan. We will plan Stage 9 properly
-in a separate pass — this document just hands you the state, the things
-that bit us in Stage 8, and what to expect.
+This is a **knowledge handover**, not a plan. Landed and green since Stage 11:
+value-method dispatch on `VImpl` (DEC-020), short-circuit `&&`/`||` (DEC-021),
+inherent impls `impl Type { … }` (DEC-022), the array type `[T]` in type
+position (no DEC), and the Milestone 11.5 router demos (`service.di` plus a
+graceful-shutdown approximation `graceful.di`). It records what changed and the
+load-bearing facts the next planner needs — it does **not** plan the next stage.
+The previous (post-Stage-11) handoff has been replaced by this one.
 
 ## Where we are
 
-Stages 1–8 are landed and green (**100 tests** across stage1–8, stress,
-errors). `dune build && dune runtest` is the gate.
-
-Surface coverage as of Stage 8: `let` / `let mut`, `x = rhs`,
-`recv.field = rhs`, `loop` / `while` / `break [v]` / `continue`, `fn` +
-`return`, capabilities + `provide ... in`, structs + `impl`, enums + `raise`
-/ `try` / `??` / `?.`, `defer` (block-scoped, DEC-012), string interpolation,
-arrays `[a, b, c]` + indexed reads/writes `xs[i]`, `for x in xs { ... }`,
-and value-method dispatch (`xs.len()`, `xs.push(v)`).
+Stages 1–11 plus the value-method-dispatch work are landed and green
+(**130 tests**: 120 prior + 5 `valuemethod` stage fixtures + 2 router smoke
+tests + 3 new `errors` cases). `dune build && dune runtest` (run from
+`dilang-interpreter/`) is the gate. Repo layout: `dilang-interpreter/{lib,bin,test}`
+for code; `plans/` and `docs/` at repo root.
 
 Source of truth, in order of precedence:
-- `plans/interpreter.md` — Stage 9 section starts at line 859.
-- `docs/lang/syntax.md`, `docs/lang/design.md`, `docs/lang/decisions.md`.
+- `plans/interpreter.md` — **Milestone 11.5** is now shipped (route-table demo,
+  `test/programs/router/service.di`; plus a graceful-shutdown approximation,
+  `programs/router/graceful.di`); **Stage 12 — Scopes** (`@ Request`) at
+  line ~1175 is the next planned stage.
+- `docs/lang/syntax.md`, `docs/lang/design.md`, `docs/lang/decisions.md`
+  (decisions now run through **DEC-022**).
 
-## What Stage 9 adds (one-paragraph rundown)
+## What this change shipped
 
-Strings as a methodable value, riding the `MethodCall` plumbing Stage 8
-introduced. The bare set is `.len()`, `.contains(needle)`,
-`.starts_with(prefix)`, `.ends_with(suffix)`, `.split(sep) -> [Str]`,
-`.trim()`. No string mutation in v0. No char-level operations — `.chars()`
-and `s[i]` are deferred. **There are no new AST nodes, no new tokens, no
-new parser rules** — Stage 9 is purely a value-method-dispatch extension
-plus a tiny string utility. Detailed list and eval sketch live in
-`plans/interpreter.md:859`.
+**Value-method dispatch on `VImpl` is the headline (DEC-020).** Previously
+`value_method_dispatch` (`eval.ml`) handled only `[T]` and `Str`; any `VImpl`
+(user struct / host impl value) fell through to *"method … not supported on this
+value"*, so user-struct/impl methods were reachable **only** through capability
+dispatch (`cap_call`). That gap — flagged as the biggest structural finding of
+Stage 11 — is now closed:
 
-## Things to know before you touch anything
+- A `VImpl` arm in `value_method_dispatch` resolves `name` against `iv.methods`.
+  `DUser m` runs through the shared helper `call_impl_method ctx iv m args
+  ~caps:ctx.caps ~bind_self:true`; `DHost f` calls the host fn. `cap_call`'s
+  `DUser` arm was refactored to call the **same** helper with
+  `~caps:impl.cap_env ~bind_self:(impl.fields <> [])` — behavior unchanged.
+- **Caller-caps, deliberately.** Value-dispatched user methods run with the
+  *caller's* caps (`ctx.caps`), unlike `cap_call` (impl's captured `cap_env`),
+  because a plain `let p = Point{…}` value was never wired through `provide`.
+  Proven by `test/stages/vm_method_calls_cap.di` (a struct built outside a
+  `provide`, its method calls `Logger.info` resolved at the call site).
+- **Rust method/field rule.** `s.f(args)` is always an impl method; a field
+  holding a function is called `(s.f)(args)`. Same-name field+method is allowed.
+  Missing-method error hints `"field f on T is not a method; call it as
+  (x.f)(...)"` when a field of that name exists, else `"no method f on T"`.
 
-These are the load-bearing facts that aren't obvious from the code:
+**`r.handler(req)` blocker resolved.** The router needs to call a function held
+in a struct field. `(r.handler)(req)` now parses (new general call form
+`(expr)(args)` in `atom`/`head_atom`) and runs (eval's existing general `Call`
+arm). The no-paren `r.handler(req)` is — correctly — a method call now, and
+errors with the field-vs-method hint.
 
-- **Stage 9 is almost entirely an `eval.ml` change.** Specifically,
-  `value_method_dispatch` at `lib/eval.ml:394` — that's where `VArray`
-  currently lives, and where `VStr` arms slot in alongside. Don't reach
-  for parser or AST changes; the plan calls for none, and the existing
-  `MethodCall { target; name; args }` already accepts arbitrary expression
-  receivers (`"hello".len()` parses today, it just panics at eval).
+**Short-circuit `&&` / `||` (DEC-021).** Dedicated `And`/`Or` AST nodes (not
+`bin_op`, since `eval_binop` takes pre-evaluated operands). `||` lexes as one
+`BARBAR`, shared with the zero-arg lambda `||body`; spaced `| |body` still lexes
+as two `PIPE`s. Precedence ladder (loosest first): `BARBAR`, `AMPAMP`,
+`QMARK_QMARK`, comparisons, `+`/`-`, `*`/`/`.
 
-- **`Stdlib.String.split_on_char` only takes a single char.** Stage 9's
-  `.split(sep: Str)` must accept a multi-character separator. Write a
-  small `String_util.split_on_substring : string -> string -> string list`
-  (~15 lines using `String.index_from`). Mirror that for `.contains`,
-  which is just "find substring or not." Put the helper in a new
-  `lib/string_util.ml` (no `.mli` needed at this stage; we haven't been
-  writing `.mli`s elsewhere — confirm against the rest of `lib/`).
+**Array type `[T]` in type position.** `type_name` gained `LBRACKET type_name
+RBRACKET` (stringified placeholder; types are erased at runtime), so
+`fn route(req: Request, table: [Route])` parses. This was already documented in
+syntax §Arrays as the array type — the parser just hadn't implemented it. It
+added **no** new conflicts (LBRACKET after `:`/`->` is unambiguous). No DEC: it
+brings the parser in line with already-documented syntax.
 
-- **Edge cases the plan calls out explicitly** —
-  `"".split(sep)` returns `[""]` (one-element array, the empty string).
-  `s.split("")` panics with a specific message; "split on empty" is
-  ambiguous, and we'd rather a clear failure than a silent
-  one-char-per-element fan-out. Write the panic message specific enough
-  that a future test can pin it (e.g. `"split: separator must be non-empty"`).
+**Inherent impls (DEC-022).** A bare `impl Type { fn ... }` (no `for`, no
+interface) declares a type's own methods, reached by receiver via value dispatch.
+A second `decl` production in `parser.mly` (`IMPL IDENT LBRACE … RBRACE` →
+`caps = []`); `caps`/`priv_requires` are never read at runtime so empty caps
+needs no plumbing. Disambiguates one token after `IMPL IDENT` (`LBRACE` vs
+`FOR`/`PLUS`) — **zero** new conflicts. This removed the "marker capability"
+hack from value types: `Router` is now `impl Router { … }`. Note `trait` is
+**still unimplemented** (only `capability` exists); inherent impls are the
+no-interface form, orthogonal to the eventual trait (named-interface-by-receiver)
+form. Pinned by `vm_inherent_impl.di`.
 
-- **`.split` returns `VArray` of `VStr`.** That means the result composes
-  with Stage 8 immediately: `s.split(" ")[1]`, `s.split(",").len()`,
-  `for p in s.split(",") { ... }`. Add at least one cross-stage test that
-  exercises this — Stage 8's parser already accepts `expr[idx]` and
-  `expr.method()` chains, so the test mostly verifies eval glue.
+**Milestone 11.5 router demo landed** at `test/programs/router/service.di`: a
+`Route` struct (with a `handler: fn(Request) -> Response` field), a `route(req,
+table: [Route])` fn matching method + path-prefix with `&&`, and
+`(r.handler)(req)` to invoke the matched handler. Driven by the `router_demo`
+test (`run_test.ml`) over four requests (matched GET, body-echoing POST, unknown
+path, wrong method) through the same fork fixture as the Stage 11 HTTP tests.
+**Note:** dilang has no `;` statement separator — block statements are
+newline/adjacency-separated; the plan's `;`-joined handler body was rewritten.
 
-- **`MethodCall` has two eval paths; don't unify them.** At
-  `lib/eval.ml:224`, the arm checks `Var n when Hashtbl.mem ctx.cap_decls n`
-  first and routes to `cap_call`; everything else evaluates the target
-  and goes to `value_method_dispatch`. Stage 9 lives entirely in the
-  second path. Don't add `VStr` handling to `cap_call`.
+## The `HttpServer`-as-value question is now UNBLOCKED
 
-- **Parser conflict budget — 6 states, hold the line.** Stage 8 grew the
-  count from 3 to 6 (all `atom . LBRACKET` family, all resolve via shift,
-  all documented in the addendum below). Stage 9 introduces no parser
-  changes, so the count should stay at exactly 6. If you find yourself
-  adding a parser rule "for safety" or "to be consistent," stop — the
-  plan doesn't ask for it, and `lib/parser.conflicts` will catch the
-  regression. Diff `lib/parser.conflicts` before and after; expect zero
-  changes.
+Stage 11's open design question (keep `HttpClient` as a capability; revisit
+`HttpServer` toward a `Net`-authority capability + server/`Router`-as-value)
+named "once value-method dispatch on `VImpl` exists" as its precondition. **That
+precondition is now met.** `server.serve()` / `listener.accept()` on a value now
+have a code path. `programs/router/graceful.di` (the `router_graceful` test) is a
+first approximation of design §4.8: a `Router` value with inherent-impl
+builder/dispatch methods and `defer`-based deterministic teardown, with the
+bounded `--max-requests` loop standing in for shutdown. It is graceful *in spirit*
+only — there is still no signal handling, no concurrent request handling, and
+nothing to drain (the server is sequential). Genuine graceful shutdown needs the
+reshaping below **plus** Stage 15 (concurrency / in-flight `Group`) and Stage 16
+(`with_timeout` / cancellation). The substance, unchanged and still un-DEC'd:
+- `HttpClient` is a clean capability (ambient authority, short effects) — keep.
+- `HttpServer` is the weaker fit: `serve(port, handler)` is long-lived,
+  blocking, stateful with a lifecycle. The principled alternative is a `Net`
+  *authority* capability (`listen(port) -> Listener`) with `Listener` / server /
+  `Router` as **structs + impl**. The router demo is already value-shaped.
+- The Eio guts stay a host impl either way; the capability-vs-value choice only
+  changes the *interface*. Write a DEC when it's decided.
 
-- **Env shape, defer discipline, `BREAK / RAISE atom`** — unchanged from
-  Stage 8. Re-read the Stage 8 handoff (in git, `git show HEAD~1
-  -- plans/interpreter-handoff.md` won't show it since this *is* that
-  file; use `git log -p plans/interpreter-handoff.md`) if you want the
-  full briefing on these. Stage 9 doesn't touch any of them.
+## Carry-forward facts (still load-bearing)
 
-- **DEC-014 / DEC-015 (Deferred) remain deferred.** Strings are immutable
-  in v0 — there's no `.push_str` or `.replace_in_place` — so neither DEC
-  bites on this stage. If you find yourself wanting string mutation,
-  push back: it's not on the plan, and adding it now means working
-  through the same `mut`-on-receiver-root analysis that DEC-015 parks.
-
-- **Per-test workflow** — `dune build` then
-  `./_build/default/bin/main.exe run test/stages/<name>.di` to capture
-  output, then write the expect file. Don't hand-write the expected
-  output; Stage 7 caught a wrong pre-written defer expectation, and the
-  same trap exists for any test that mixes `for` + `defer` + `.split`.
-
-## What bit us in Stage 8 (learn from these)
-
-1. **The plan called for a parser-conflict budget of ≤ 4. We landed at 6.**
-   All three new states were the same `atom . LBRACKET` shape in different
-   parent contexts — inherent to choosing `[...]` for both array literals
-   *and* postfix indexing with no statement terminator. See the addendum
-   at the bottom of this file for the long-form analysis and the two
-   escape hatches if anyone ever wants the budget back. Lesson: when a
-   syntactic choice is inherent (no parser rule reshuffle dodges it),
-   document and move on rather than bending precedence pragmas to hide
-   it. Stage 9 has no analogous risk because it adds no syntax.
-
-2. **`for n in nums { ... }` triggered a pre-existing latent ambiguity.**
-   The struct-literal form `Foo { … }` made the parser unable to tell
-   `for n in nums { ... }` from `for n in (nums { ... })` (struct lit
-   with field `nums`). Fix was a Rust-style `head_expr` non-terminal —
-   a restricted expression form used at the heads of `if` / `while` /
-   `for ... in` / `else if`, with struct literals forbidden at the top
-   level. This is the same trick Rust uses; it's not a hack, it's the
-   designed-in answer. If Stage 9 ever tempts you to add another
-   construct that takes an expression followed by `{`, use `head_expr`,
-   don't reinvent it. (`head_expr` lives in `lib/parser.mly`.)
-
-3. **`MethodCall` collapsed `CapCall` rather than living alongside it.**
-   The first instinct was to keep `CapCall` as-is and add `MethodCall`
-   as a separate node. The plan called for collapsing them into one
-   AST node with two eval paths, and it was the right call — the
-   parser would otherwise have needed to look ahead to decide which
-   node to build, and the eval-side branching is cleaner. Stage 9
-   doesn't touch this, but the lesson generalises: when a new feature
-   *looks* like an existing one at the parser level, prefer one node
-   with eval-side routing over two nodes with parser-side disambiguation.
-
-4. **The handoff's expected outputs aren't authoritative.** Same as
-   Stage 7. Re-derive expected output from the program every time.
-
-5. **DEC additions cost almost nothing.** Stage 8 landed DEC-015
-   (indexed/method-call mutation requires `mut` on receiver root,
-   deferred enforcement). Stage 9 may surface its own analogous fork —
-   for example, should `.trim()` on an interpolated literal be
-   syntactically rejected, or just produce dead work? Drop a DEC entry
-   when you make a non-trivial call, even if v0 doesn't enforce it.
-
-## Reporting back
-
-When Stage 9 lands, summarize:
-- What runs end-to-end: the canonical string example from
-  `plans/interpreter.md:863` plus at least one cross-stage interaction
-  (e.g. `for p in s.split(",") { print(p.trim()) }`).
-- Whether `lib/parser.conflicts` changed at all (expectation: no — Stage
-  9 should touch zero parser rules).
-- Whether `String_util` ended up larger than ~15 lines, and if so why
-  (multi-byte separators? a regex creep that shouldn't have happened?).
-- Any new DEC entries (DEC-016+) and what they're parking.
-- One-liner: Stage 9 gives Dilang **string methods on the same
-  `MethodCall` machinery as arrays**. Stage 10 follows with closures.
+- **dilang comments are `//` only** — no `(* *)`; an OCaml comment in a `.di`
+  file is a parse error. **No `;` statement separator** — newline/adjacency.
+- **`Logger` is not in the prelude** — only the HTTP caps are. Any service
+  program calling `Logger.info` must `capability Logger { fn info(msg: Str) }`
+  itself. `StdoutLogger` is a host *impl*, always registered, but a host impl
+  needs its capability *declared* for `MethodCall` to route to cap dispatch.
+- **Bare construction, DEC-009 unchanged** — `Foo @ Process`, not `Foo()`.
+  `interpreter.md` examples that use `Foo()` construction, `catch _ { … }`, or
+  `;` separators are aspirational; re-derive every program from the grammar and
+  run it before pinning output.
+- **`requires` precedes `raises`** in fn/cap signatures.
+- **No module cycle:** `eval.ml` opens only `Ast` and `Value`, so
+  `host_builtin.ml` calls `Eval.call_value` / `Eval.call_impl_method` and raises
+  `Eval.Dilang_error` freely.
+- **`impl_decl.caps` / `priv_requires` are never read at runtime** — only
+  `for_ty` (to index `impls_by_ty` in `driver.ml`) and `methods` (collected by
+  `methods_for_ty`, which rejects duplicate names *across all impl blocks for a
+  type*, inherent + `for`). This is why inherent impls (DEC-022) needed no eval
+  plumbing — `caps = []` is inert. A future row-checker is where those fields
+  start mattering. Methods from an inherent impl and from `impl Cap for Type`
+  blocks all merge onto the same struct constructor.
+- **Prefix-route catch-all gotcha.** The router demos match on `path.starts_with(prefix)`,
+  so a `prefix: "/"` route catches *every* path — `GET /nope` hits the root
+  handler, not the 404. The `router_graceful` test's 404 case therefore uses an
+  unbound `POST /missing` (no route has the POST+`/missing` combination), not a
+  GET. A real router would need longest-prefix / exact-match precedence; the demo
+  deliberately keeps first-match-wins.
+- **The fork-based HTTP fixture has sharp edges** (`run_test.ml`): child runs
+  `Driver.run_file ~max_requests` with stdout dup2'd to a pipe and exits via
+  `Unix._exit`; parent retries the **TCP connect** (send nothing until connect
+  succeeds) to wait for the listener; `waitpid` must **retry on `EINTR`**; budget
+  `max_requests` to exactly the number of requests sent (each raw send =
+  one served request). The reusable driver is now `with_server ~prog`
+  (`with_http_server ~service` is a thin wrapper); `http_get_raw` /
+  `http_post_raw` send one request each. HTTP request bodies are read only when
+  `Content-Length` is present (the GET-deadlock fix); responses read-to-EOF.
+- **Manual router smoke:** `dune exec dilang -- run
+  test/programs/router/service.di --max-requests 4` in the background, then
+  `curl localhost:18080/health` → `ok`, `curl -XPOST -d hi
+  localhost:18080/echo` → `hi`, `curl localhost:18080/nope` → `no route`; server
+  exits clean after 4 requests. (Port is **18080**, matching the HTTP fixtures —
+  not 8080.)
+- **DEC entries are cheap; keep writing them.** This round added DEC-020
+  (value-method dispatch), DEC-021 (short-circuit operators), and DEC-022
+  (inherent impls). The array type `[T]` got no DEC — it just implements
+  already-documented syntax (§Arrays).
+- **`trait` is still unimplemented.** Only `capability` exists as an interface
+  decl; there is no `trait` keyword/parser/AST node (despite syntax §3 and
+  DEC-008 describing traits). Value types use inherent impls (DEC-022) for their
+  own methods. A real `trait` — named interface resolved by receiver, with
+  default-method bodies — is a separate unbuilt feature; value-method dispatch
+  (DEC-020) is the runtime mechanism it would reuse.
 
 ## Out of scope (per `plans/interpreter.md`)
 
-`.chars()`, `s[i]` indexing, Unicode-aware operations, `.replace` /
-`.to_lower` / `.to_upper`, `StringBuilder` host type, string `+`
-optimisation. Closures (Stage 10), HTTP (Stage 11), scopes / Lifecycle /
-Wiring (Stages 12–14), streams (Stage 17).
+Per-request scoping (`@ Request`) — Stage 12. DB pool + `Lifecycle` — Stage 13.
+Concurrent request handling (`EioHttpServer`) — Stage 15. Per-request timeouts —
+Stage 16. Streaming/chunked/SSE — Stage 17. HTTPS, HTTP/2, websockets — not on
+the roadmap. Header ergonomics deferred until a tuple/map value exists
+(DEC-019). Row-polymorphic generics on function types remain deferred to the
+type-checker phase.
 
 -----
 
-## Addendum (Stage 8 landed) — parser conflict budget
+## Addendum (standing) — parser conflict budget
 
-The Stage 8 plan budgeted **≤ 4** conflict states; the committed parser
-ends at **6** (`lib/parser.conflicts`). The over-run is intentional. The
-three new states are all the same structural family — `atom . LBRACKET`
-at a position where reduce is also valid — instantiated in three
-different parent contexts. Default shift wins in each, and shift is the
-desired behavior: `xs[0]` is indexing, `break xs[0]` carries an indexed
-payload, and `raise X[0]` shifts into an `Index` which the existing
-RAISE semantic action then rejects (same outcome the reduce path would
-yield). Exact state numbers shift across parser regens; consult
-`lib/parser.conflicts` for the current set rather than memorising IDs.
+The committed parser now sits at **12** conflict states (`lib/parser.conflicts`),
+up deliberately from the prior **7**. All are shift/reduce, all resolved by the
+desired default-shift. Three families:
 
-These conflicts are inherent to the syntactic choices already in the
-language: `[...]` for both array literals and postfix indexing, combined
-with no statement terminator. Every language with that combination hits
-this ambiguity; C / Rust / Go / Python dodge it via mandatory `;` or
-significant newlines, JavaScript famously trips on it via ASI. We chose
-neither, so the price is paid in the parser tables.
+1. **General-call-form `atom . LPAREN`** (7 states). The new `(expr)(args)`
+   production overlaps with: the bare `IDENT LPAREN` call rule (default-shift
+   keeps `print(x)`/`Some(1)` on it); `expr -> atom` as a block statement;
+   `dot_tail` empty vs `LPAREN` (default-shift makes `x.f()` a **method call**,
+   not field-then-call); `break`-payload and `raise`-payload atoms extending
+   into a call. Mirrored in `head_atom` for `if`/`while`/`for` heads.
+2. **`||`-operator vs zero-arg-lambda-statement** (3 states). After an `expr` in
+   statement position (`let x = a`, bare `expr`, `expr = rhs`), lookahead
+   `BARBAR` default-shifts the or-operator into the expression rather than
+   starting a new `||body` lambda statement (`let x = a || b` = `let x = (a || b)`).
+3. **`BARBAR`/`AMPAMP` joining pre-existing families**: the `break`-payload state
+   (a `||body` lambda can be a payload) and the Stage-10 lambda-body-absorbs-
+   trailing-operator state (`|x| x && y` = `|x| (x && y)`).
 
-Two paths to bring the budget back, if it ever matters:
-
-1. **Restrict statement-position expressions** — introduce a `stmt_expr`
-   non-terminal (mirror of the `head_expr` added in Stage 8) used at the
-   block_item lhs and as the BREAK / RAISE payload, with `LBRACKET
-   arglist RBRACKET` removed at its top level. Forbids the useless
-   standalone `[1,2,3]` statement, kills all three new states. Same
-   complexity cost as the existing `head_expr`.
-2. **Adopt significant newlines (Go-style ASI)** — lexer becomes stateful
-   and emits a synthetic separator after IDENT / literal / `]` / `}` /
-   `)` / `return` / `continue` / `break` at line end. Kills these three
-   conflicts *and* lets `head_expr` be deleted. Real language-design
-   change; warrants its own DEC and a focused stage.
-
-Until then: treat the committed `lib/parser.conflicts` (6 states) as the
-baseline. Diff against it on every parser change. Anything beyond 6
-needs investigation; Stage 9 in particular should leave it untouched.
+The array-type `[T]` and inherent-impl (`impl Type { … }`) productions each
+added **zero** conflicts. Exact state numbers
+shift across regens; consult `lib/parser.conflicts` for the current set rather
+than memorising IDs. Treat **12** as the baseline and `diff` against it on every
+parser change — if it moved, you touched the grammar.

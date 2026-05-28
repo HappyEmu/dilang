@@ -1,6 +1,7 @@
 (test
  (name run_test)
- (libraries dilang alcotest str)
+ (libraries dilang alcotest str unix)
  (deps
   (source_tree stages)
-  (source_tree expect)))
+  (source_tree expect)
+  (source_tree programs)))
