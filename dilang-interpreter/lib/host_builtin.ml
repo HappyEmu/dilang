@@ -27,8 +27,8 @@ let stdout_logger fs : impl_value =
    The dilang-level capability/struct/enum *declarations* live in the parsed
    prelude (`prelude.ml`); only these impls stay in OCaml. *)
 
-(* The per-`provide` switch the capability was bound under. `serve`/`connect`
-   attach their sockets to it, so they live exactly as long as the `provide`
+(* The per-`with` switch the capability was bound under. `serve`/`connect`
+   attach their sockets to it, so they live exactly as long as the `with`
    block that wired the capability. *)
 let cap_switch ctx =
   match ctx.caps with
@@ -84,7 +84,7 @@ let blocking_http_server fs : impl_value =
               (* The load-bearing call: `call_value` swaps in the handler
                  closure's *captured* caps, so `Logger.info` inside the handler
                  resolves even though we are calling from OCaml host code,
-                 outside the `provide`. *)
+                 outside the `with` block. *)
               match Eval.call_value ctx handler [VImpl request] with
               | VImpl iv ->
                   let (status, rbody) = response_fields iv in

@@ -7,12 +7,12 @@
 //     route list and return `self`, so calls chain like v4's `Router.new().get(..)`.
 //   - Short-circuit `&&` (DEC-021) in the route match.
 //   - `defer` for deterministic cleanup: per-request (the handler closure's
-//     block) and at shutdown (the `provide ... in` block).
+//     block) and at shutdown (the `with [...]` block).
 //   - "Graceful shutdown" = the bounded accept loop (`--max-requests`) returns,
-//     the `provide` block exits, and its `defer` fires the shutdown log.
+//     the `with` block exits, and its `defer` fires the shutdown log.
 //
 // What §4.8 needs that does NOT exist yet (see the handoff gap table):
-//   - `provide @ Request { RequestCtx = ... }`  -> Stage 12 (scopes)
+//   - `with [RequestCtx <- ...] @ 'Request`    -> Stage 12 (scopes)
 //   - `io.Tasks.async` / `Group` / `.concurrent` -> Stage 15 (concurrency)
 //   - `with_timeout(30.seconds)` / `Cancelled`   -> Stage 16 (cancellation)
 //   - signal-driven drain, `Net`-authority bind/accept/close, maps, associated
@@ -27,25 +27,25 @@ struct Router { routes: [Route] }
 
 // Inherent impl (DEC-022): a `Router` is value-shaped, so its methods are its
 // own — no capability/trait interface. They reach the value through value-method
-// dispatch (DEC-020), never through `provide`.
+// dispatch (DEC-020), never through `with`.
 impl Router {
     fn get(prefix: Str, handler: fn(Request) -> Response) -> Router {
         self.routes.push(Route { method: "GET", prefix: prefix, handler: handler })
         self
     }
-    
+
     fn post(prefix: Str, handler: fn(Request) -> Response) -> Router {
         self.routes.push(Route { method: "POST", prefix: prefix, handler: handler })
         self
     }
-    
+
     fn dispatch(req: Request) -> Response {
         for r in self.routes {
             if req.method == r.method && req.path.starts_with(r.prefix) {
                 return (r.handler)(req)
             }
         }
-        
+
         Response { status: 404, body: "no route\n" }
     }
 }
@@ -56,10 +56,10 @@ fn hello(_: Request) -> Response { Response { status: 200, body: "Hello, world!\
 fn echo(req: Request) -> Response { Response { status: 200, body: req.body } }
 
 fn main() {
-    provide {
-        Logger     = StdoutLogger         @ Process
-        HttpServer = BlockingHttpServer   @ Process
-    } in {
+    with [
+        Logger     <- StdoutLogger
+        HttpServer <- BlockingHttpServer
+    ] @ 'Process {
         defer Logger.info("server shut down")
 
         let router = new_router()
@@ -67,7 +67,7 @@ fn main() {
             .post("/echo", echo)
 
         Logger.info("listening on 18080")
-        
+
         HttpServer.serve(18080, |req| {
             defer Logger.info("closed ${req.method} ${req.path}")
 

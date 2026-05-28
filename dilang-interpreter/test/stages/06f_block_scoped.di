@@ -1,6 +1,6 @@
 // Each surface `{ ... }` is its own defer scope (DEC-012):
 //   - if-branch body
-//   - provide-in body
+//   - with body
 //   - bare block expression
 // All three show the defer firing as the block exits, before the surrounding
 // code continues.
@@ -15,12 +15,12 @@ fn show_if_scope(n: I64) {
     print("after if")
 }
 
-fn show_provide_scope() {
-    provide { Logger = StdoutLogger @ Process } in {
-        defer print("end of provide body")
-        Logger.info("inside provide")
+fn show_with_scope() {
+    with [ Logger <- StdoutLogger @ 'Process ] @ 'Process {
+        defer print("end of with body")
+        Logger.info("inside with")
     }
-    print("after provide")
+    print("after with")
 }
 
 fn show_bare_block() {
@@ -34,7 +34,7 @@ fn show_bare_block() {
 fn main() {
     show_if_scope(1)
     print("---")
-    show_provide_scope()
+    show_with_scope()
     print("---")
     show_bare_block()
 }

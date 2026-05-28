@@ -22,7 +22,7 @@ fn with_request_logging<R, E>(
 }
 
 // Auth middleware adds `RequestCtx` to the handler's row by re-binding it
-// in a Request-scoped `provide`. The handler sees `current_user()` reflect
+// in a Request-scoped `with`. The handler sees `current_user()` reflect
 // the user this middleware verified.
 fn with_auth<R, E>(
     req: Request,
@@ -38,9 +38,9 @@ fn with_auth<R, E>(
         catch DbFailure(_) -> return Response.server_error()
     let user = user ?? return Response.unauthorized()
 
-    provide @ Request {
-        RequestCtx = RequestCtx.with_user(user) @ Request
-    } in {
+    with [
+        RequestCtx <- RequestCtx.with_user(user)
+    ] @ 'Request {
         handler()
     }
 }

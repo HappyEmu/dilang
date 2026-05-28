@@ -1,17 +1,17 @@
 // Scopes carve out finer-grained lifetimes than Process.
-// A capability annotated `@ Request` can only be bound inside a `provide @ Request`,
+// A capability annotated `@ 'Request` can only be bound inside `with [...] @ 'Request`,
 // and the compiler rejects use of it from Process scope.
 
-scope Request
+scope 'Request under 'Process
 
-capability RequestCtx @ Request {
+capability RequestCtx @ 'Request {
     fn request_id() -> Uuid
     fn current_user() -> User?
 
     fn with_user(user: User) -> Self
 }
 
-capability Tenant @ Request {
+capability Tenant @ 'Request {
     fn id() -> Uuid
     fn plan() -> Plan
 }
@@ -27,7 +27,7 @@ fn show_profile() -> Response
 }
 
 // The connection handler establishes the Request scope by binding its caps.
-// Anything inside the `in { ... }` block can see them; anything outside cannot.
+// Anything inside the `with` body can see them; anything outside cannot.
 fn handle_conn(sock: Socket, req: Request)
     requires {IO, UserRepo, TenantRepo, Logger}
 {
@@ -35,10 +35,10 @@ fn handle_conn(sock: Socket, req: Request)
 
     let tenant = lookup_tenant(req) ?? return write_response(sock, Response.bad_request("tenant"))
 
-    provide @ Request {
-        RequestCtx = RequestCtx.fresh(req)        @ Request
-        Tenant     = tenant                       @ Request
-    } in {
+    with [
+        RequestCtx <- RequestCtx.fresh(req)
+        Tenant     <- tenant
+    ] @ 'Request {
         let resp = show_profile()
         write_response(sock, resp)
     }

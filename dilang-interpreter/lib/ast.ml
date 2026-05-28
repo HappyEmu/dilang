@@ -1,5 +1,6 @@
 type ident = string
 type type_name = string
+type lifetime = string
 
 type literal =
   | LInt of int64
@@ -31,7 +32,7 @@ type expr =
      dispatches by the runtime type of the evaluated target (`VArray.len`,
      `VArray.push`, future `VStr.*`). *)
   | MethodCall   of { target : expr; name : ident; args : expr list }
-  | Provide of { entries : provide_entry list; scope : ident option; body : expr option }
+  | WithCaps of { entries : with_entry list; scope : lifetime option; body : expr option }
   | FieldGet of { recv : expr; name : ident }
   | StructLit of { ty : type_name; fields : (ident * expr) list }
   | If           of { cond : expr; then_ : expr; else_ : expr option }
@@ -66,9 +67,9 @@ and string_part =
   | SLit of string
   | SInterp of expr
 
-and provide_entry =
-  | Binding of { cap : ident; rhs : expr; scope : ident }
-  | Using   of expr list                            (* Stage 9 — parser never emits this yet *)
+and with_entry =
+  | Binding of { cap : ident; rhs : expr; scope : lifetime option }
+  | Spread  of expr
 
 and pattern =
   | PWild
@@ -100,8 +101,14 @@ type cap_method_sig = {
 
 type cap_decl = {
   c_name    : ident;
+  c_scope   : lifetime option;
   c_extends : ident list;
   c_methods : cap_method_sig list;
+}
+
+type scope_decl = {
+  sc_name   : lifetime;
+  sc_parent : lifetime option;
 }
 
 type struct_decl = {
@@ -137,6 +144,7 @@ type enum_decl    = { e_name : type_name; e_params : ident list; e_variants : en
 type decl =
   | DFn     of fn_decl
   | DCap    of cap_decl
+  | DScope  of scope_decl
   | DStruct of struct_decl
   | DImpl   of impl_decl
   | DEnum   of enum_decl

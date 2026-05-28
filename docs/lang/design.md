@@ -20,11 +20,11 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 ### 1.2 The thesis
 
-1.2.1 Dependency injection should be a first-class language feature, checked at compile time. Dependencies — both user services and the runtime itself — are tracked through the type system as **capability rows** that flow through function signatures. They are satisfied by lexically-scoped `provide` blocks that bind capability names to implementations.
+1.2.1 Dependency injection should be a first-class language feature, checked at compile time. Dependencies — both user services and the runtime itself — are tracked through the type system as **capability rows** that flow through function signatures. They are satisfied by lexically-scoped `with` blocks that bind capability names to implementations.
 
 1.2.2 User code should read as synchronous. There is no `async`/`await`, no two parallel standard libraries. Whether a call blocks an OS thread, suspends a fiber, runs on an event loop, or executes immediately is decided at `main` by the choice of runtime implementation, not at every function signature.
 
-1.2.3 The runtime is exposed as a capability. The same `provide` mechanism that wires `Database` and `Logger` also wires the scheduler, the clock, the network, and the filesystem. Tests use the same wiring mechanism as production.
+1.2.3 The runtime is exposed as a capability. The same `with` mechanism that wires `Database` and `Logger` also wires the scheduler, the clock, the network, and the filesystem. Tests use the same wiring mechanism as production.
 
 -----
 
@@ -40,11 +40,11 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 ### 2.2 Wiring is lexical and explicit
 
-2.2.1 Capabilities enter scope through `provide` blocks. A `provide` block is a lexical region in which named capabilities are bound to specific implementations. Outside that region, those bindings do not exist.
+2.2.1 Capabilities enter scope through `with` blocks. A `with` block is a lexical region in which named capabilities are bound to specific implementations. Outside that region, those bindings do not exist.
 
 2.2.2 There is no global registry, no startup-time scan, no annotation magic. The path from the use site to the binding site is the call stack — you can trace it by reading the code.
 
-2.2.3 Wiring is itself a value. A `provide { ... }` expression without a body produces a `Wiring` value that can be stored, returned, and passed around. Composition happens inside another `provide` block via the `using` directive (see §3.5). This is how production and test wiring share infrastructure: define a base wiring as a value, splat it into another `provide` and layer overrides on top.
+2.2.3 Wiring is itself a value. A `with [ ... ]` expression without a body produces a `Wiring` value that can be stored, returned, and passed around. Composition happens inside another `with` block via spread entries (see §3.5). This is how production and test wiring share infrastructure: define a base wiring as a value, spread it into another `with` and layer overrides on top.
 
 ### 2.3 No function coloring
 
@@ -58,7 +58,7 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 2.4.1 The set of capabilities provided at `main` defines what the program can do. A program built to run on a server provides a full IO implementation. A program built for the browser or an embedded device provides a restricted implementation. The same business logic runs on both, as long as it does not require capabilities the target cannot provide.
 
-2.4.2 If business logic transitively requires a capability the target does not bind, this is a compile error at the `provide` site — not a runtime crash, not a silent stub. Targets are honest about what they support.
+2.4.2 If business logic transitively requires a capability the target does not bind, this is a compile error at the `with` site — not a runtime crash, not a silent stub. Targets are honest about what they support.
 
 ### 2.5 Errors are part of the signature
 
@@ -72,13 +72,13 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 2.6.1 Two cleanup mechanisms exist. `defer { ... }` blocks run on every exit from the enclosing function — normal return, raised error, cancellation, or panic. `Drop` is a trait implemented by values that need cleanup when they go out of scope.
 
-2.6.2 Capabilities bound in `provide` blocks have a separate mechanism, `Lifecycle`, with `start()` and `shutdown(exit_reason)`. Lifecycle runs on entry to and exit from the `provide` block, in dependency order.
+2.6.2 Capabilities bound in `with` blocks have a separate mechanism, `Lifecycle`, with `start()` and `shutdown(exit_reason)`. Lifecycle runs on entry to and exit from the `with` block, in dependency order.
 
-2.6.3 The boundary is: if the thing is bound in a `provide` block, use `Lifecycle`. If the thing is a value flowing through the program, use `Drop`. If you need cleanup at every exit path of a function regardless of value lifetime, use `defer`.
+2.6.3 The boundary is: if the thing is bound in a `with` block, use `Lifecycle`. If the thing is a value flowing through the program, use `Drop`. If you need cleanup at every exit path of a function regardless of value lifetime, use `defer`.
 
 ### 2.7 Two interface mechanisms: capabilities and traits
 
-2.7.1 **Capabilities** model dependencies. They are resolved lexically through `provide` blocks. Methods are called as `Cap.method(args)` — the capability name itself names the binding. Capabilities appear in `requires` rows.
+2.7.1 **Capabilities** model dependencies. They are resolved lexically through `with` blocks. Methods are called as `Cap.method(args)` — the capability name itself names the binding. Capabilities appear in `requires` rows.
 
 2.7.2 **Traits** model the shape of values. They are resolved by the receiver value. Methods are called as `value.method(args)`. Traits appear as constraints on generic parameters (`<T: Eq>`), not in `requires` rows.
 
@@ -86,17 +86,17 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 ### 2.8 Scopes are explicit
 
-2.8.1 A scope is a declared lifetime region. `Process` is the implicit root scope. Users may declare additional scopes (`scope Request`, `scope Transaction`).
+2.8.1 A scope is a declared lifetime region. `Process` is the implicit root scope. Users may declare additional scopes (`scope 'Request under 'Process`, `scope 'Transaction under 'Process`).
 
-2.8.2 Capabilities can be annotated with the scope they belong to (`capability RequestCtx @ Request`). The compiler rejects use of a scoped capability outside its declared scope.
+2.8.2 Capabilities can be annotated with the scope they belong to (`capability RequestCtx @ 'Request`). The compiler rejects use of a scoped capability outside its declared scope.
 
-2.8.3 Every binding in a `provide` block specifies its scope explicitly with `@ ScopeName`. There are no defaults. Scope visibility is a deliberate design choice at every binding site.
+2.8.3 A `with` block may declare a default scope with `@ 'Scope` after the entry list. Without that default, every direct binding must specify `@ 'Scope`. Scope visibility is a deliberate design choice at every binding site.
 
 ### 2.9 Construction and calls are syntactically distinct
 
 2.9.1 Struct/impl literals use braces: `Foo { field: value }`. Function and method calls use parens: `foo(arg)`, `Cap.method(arg)`. The shape carries semantics — a reader can tell *pure data construction* from *invocation* without resolving the name.
 
-2.9.2 Fieldless structs may be constructed with the bare name (`JsonLogger` ≡ `JsonLogger {}`), matching the unit-struct ergonomics that keep `provide` blocks readable.
+2.9.2 Fieldless structs may be constructed with the bare name (`JsonLogger` ≡ `JsonLogger {}`), matching the unit-struct ergonomics that keep `with` blocks readable.
 
 2.9.3 Renaming a struct into a function (or vice versa) with the same name produces a parse-level shape mismatch at every call site, not a silent semantic flip. The cost of two syntaxes buys this refactor safety. See DEC-009.
 
@@ -104,7 +104,7 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 2.10.1 The dominant cost of code is reading it — at review, after returning to it months later, when a new contributor lands. Most code today is being written by agents; most of the human time spent on a codebase is review. The language design treats writers as the secondary audience.
 
-2.10.2 Concrete manifestations: `requires {...}` rows on signatures (§2.1), explicit `@ ScopeName` on every binding (§2.8.3), the absence of `?` for error propagation (§2.5.3), and the construction/call syntactic split (§2.9). In each case the writer types more so the reader thinks less. That trade is the right one when an LLM types most of the keystrokes.
+2.10.2 Concrete manifestations: `requires {...}` rows on signatures (§2.1), explicit lifetime scopes at `with` sites (§2.8.3), the absence of `?` for error propagation (§2.5.3), and the construction/call syntactic split (§2.9). In each case the writer types more so the reader thinks less. That trade is the right one when an LLM types most of the keystrokes.
 
 2.10.3 Named arguments at call sites would be another natural manifestation of this principle but the design is non-trivial (DEC-010 deferred). Until then, the burden falls on writers to use descriptive local names so `deposit(account, amount, currency)` reads at least as `deposit(alice_account, transfer_amount, usd)`.
 
@@ -118,7 +118,7 @@ This section describes the language's concepts without code. Concrete syntax is 
 
 3.1.1 A capability is a named interface that represents a dependency. Declaring a capability `Logger` with methods `info`, `warn`, `error` says "any code may demand a logger; any implementation of logging may be bound to that demand."
 
-3.1.2 A capability is *demanded* by listing it in a function's `requires` row. A capability is *supplied* by an implementation (`impl Logger for JsonLogger`) bound inside a `provide` block. The compiler matches demand to supply by walking outward from the use site through enclosing `provide` blocks.
+3.1.2 A capability is *demanded* by listing it in a function's `requires` row. A capability is *supplied* by an implementation (`impl Logger for JsonLogger`) bound inside a `with` block. The compiler matches demand to supply by walking outward from the use site through enclosing `with` blocks.
 
 3.1.3 Capabilities can extend other capabilities (`capability WriteDb extends ReadDb`). An impl of `WriteDb` satisfies a requirement for `ReadDb`.
 
@@ -156,21 +156,21 @@ This section describes the language's concepts without code. Concrete syntax is 
 
 ### 3.5 Wiring values
 
-3.5.1 A `provide { bindings }` expression without a body is a value of type `Wiring`. It captures a set of bindings that have not yet entered any lexical scope.
+3.5.1 A `with [ bindings ]` expression without a body is a value of type `Wiring`. It captures a set of bindings that have not yet entered any lexical scope.
 
-3.5.2 Wirings compose by being splatted into another `provide` block via the `using` directive. Each entry inside a `provide` block is either a binding (`Cap = expr @ Scope`) or a `using` directive that splats one or more Wirings (`using w1, w2`). Entries combine in lexical order; later entries shadow earlier ones on conflict. There is no separate composition operator — composition is a `provide`-block construct, not a value-level one.
+3.5.2 Wirings compose by being spread into another `with` block via `...wiring`. Each entry inside a `with` block is either a binding (`Cap <- expr [@ 'Scope]`) or a spread entry. Entries combine in lexical order; later entries shadow earlier ones on conflict. There is no separate composition operator — composition is a `with`-block construct, not a value-level one.
 
-3.5.3 This is what makes test setup tractable. A base test Wiring binds the common infrastructure (test logger, fixed clock, in-memory database). Specific tests splat the base via `using` and add their overrides as later entries. There is no fixture inheritance, no parameterized container — just lexical composition.
+3.5.3 This is what makes test setup tractable. A base test Wiring binds the common infrastructure (test logger, fixed clock, in-memory database). Specific tests spread the base via `...` and add their overrides as later entries. There is no fixture inheritance, no parameterized container — just lexical composition.
 
-3.5.4 The compiler statically tracks what each Wiring provides and what it still requires. This works because bindings inside a Wiring are syntactically restricted: the cap name, the impl type, and the scope are all compile-time-known per entry. Only the impl's *constructor arguments* may carry runtime data. A `Wiring`-returning function must therefore produce the same binding set on every call; only the values flowing into impl constructors may vary. The eventual `provide w in { body }` site then checks that `body.requires ⊆ w.provides` and that `w` has no unsatisfied private requires.
+3.5.4 The compiler statically tracks what each Wiring provides and what it still requires. This works because bindings inside a Wiring are syntactically restricted: the cap name, the impl type, and the scope are all compile-time-known per entry. Only the impl's *constructor arguments* may carry runtime data. A `Wiring`-returning function must therefore produce the same binding set on every call; only the values flowing into impl constructors may vary. The eventual `with [...w] { body }` site then checks that `body.requires ⊆ w.provides` and that `w` has no unsatisfied private requires.
 
 ### 3.6 Scopes and Lifecycle
 
-3.6.1 Every program runs inside an implicit `Process` scope. User-declared scopes (`scope Request`, `scope Transaction`) describe shorter-lived regions.
+3.6.1 Every program runs inside an implicit `Process` scope. User-declared scopes (`scope 'Request under 'Process`, `scope 'Transaction under 'Process`) describe shorter-lived regions.
 
-3.6.2 A capability annotated `@ ScopeName` may be bound only in a `provide` block targeting that scope. Re-entering the scope (the framework re-entering `provide @ Request` per request, for example) yields a fresh instance.
+3.6.2 A capability annotated `@ 'ScopeName` may be bound only in a `with` block targeting that scope. Re-entering the scope (the framework re-entering `with [...] @ 'Request` per request, for example) yields a fresh instance.
 
-3.6.3 The `Lifecycle` trait — `start()` and `shutdown(exit_reason)` — runs on every entry to and exit from a `provide` block where the impl is bound. Startup order is the topological order of `requires` rows on `start` methods, with ties broken by lexical declaration order. Shutdown runs in reverse.
+3.6.3 The `Lifecycle` trait — `start()` and `shutdown(exit_reason)` — runs on every entry to and exit from a `with` block where the impl is bound. Startup order is the topological order of `requires` rows on `start` methods, with ties broken by lexical declaration order. Shutdown runs in reverse.
 
 3.6.4 If a `start()` fails, the impls that started successfully are shut down in reverse order with an exit reason indicating the failure, and the original error propagates. The failing impl is not asked to shut down — it never finished starting.
 
@@ -182,7 +182,7 @@ This section describes the language's concepts without code. Concrete syntax is 
 
 ### 4.1 What the compiler rejects
 
-4.1.1 Calling a capability method without that capability available in lexical scope (no enclosing `provide` block, or the binding is in a different scope from the call site).
+4.1.1 Calling a capability method without that capability available in lexical scope (no enclosing `with` block, or the binding is in a different scope from the call site).
 
 4.1.2 A `pub` function whose declared rows do not match its body's inferred rows. Both under-declaration (used but not listed) and over-declaration (listed but not used) are errors.
 
@@ -190,13 +190,13 @@ This section describes the language's concepts without code. Concrete syntax is 
 
 4.1.4 Raising an error variant not declared in the function's `raises` row, or letting an error escape a `try ... catch` without re-declaring it.
 
-4.1.5 Constructing an impl whose private `requires` row is not satisfied at the `provide` site.
+4.1.5 Constructing an impl whose private `requires` row is not satisfied at the `with` site.
 
 4.1.6 A cycle in `Lifecycle.start()` requirements.
 
-4.1.7 Forward references inside a single `provide` block. Bindings can only see earlier bindings.
+4.1.7 Forward references inside a single `with` block. Bindings can only see earlier bindings.
 
-4.1.8 A `provide` binding without an explicit `@ ScopeName`.
+4.1.8 A direct `with` binding without either a block default `@ 'ScopeName` or its own explicit `@ 'ScopeName`.
 
 4.1.9 Using a capability name as a generic constraint, or a trait name in a `requires` row.
 

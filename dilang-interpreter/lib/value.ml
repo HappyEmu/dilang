@@ -12,7 +12,7 @@ type value =
   | VArray of value array ref
   (* Stage 10: first-class closures. Captures both the lexical `env` *and* the
      capability stack `caps` at definition time, so a closure built inside a
-     `provide { ... } in { ... }` still resolves its capabilities when invoked
+     `with [ ... ] { ... }` still resolves its capabilities when invoked
      after that block has exited. Effect rows are not tracked this stage. *)
   | VClosure of { params : (Ast.ident * Ast.type_name option) list;
                   body   : Ast.expr;
@@ -54,7 +54,7 @@ and ctx = {
   sink              : sink;
   (* Stage 11: the Eio network from `Eio.Stdenv.net env`, threaded from
      `run_file` so host impls (`BlockingHttpServer`/`BlockingHttpClient`) can
-     listen/connect. The per-`provide` switch they use is read off
+     listen/connect. The per-`with` switch they use is read off
      `(List.hd ctx.caps).switch`, not stored here. *)
   net               : [`Generic] Eio.Net.ty Eio.Resource.t;
   (* Stage 11: bounds the server accept loop (`Some n` → serve n requests then

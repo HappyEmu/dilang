@@ -30,6 +30,7 @@ let build_tables prog =
   List.iter (function
     | Ast.DFn f     -> Hashtbl.replace fns f.name f
     | Ast.DCap c    -> Hashtbl.replace caps c.c_name c
+    | Ast.DScope _  -> ()
     | Ast.DStruct s -> Hashtbl.replace structs s.s_name s
     | Ast.DImpl i   ->
         let prev = try Hashtbl.find impls_by_ty i.for_ty with Not_found -> [] in

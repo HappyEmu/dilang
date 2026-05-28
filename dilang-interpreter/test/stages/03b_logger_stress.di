@@ -26,10 +26,10 @@ fn outer(name: Str) requires {Logger, Greeter} {
 }
 
 fn main() {
-    provide {
-        Logger  = StdoutLogger  @ Process,
-        Greeter = StdoutGreeter @ Process
-    } in {
+    with [
+        Logger  <- StdoutLogger  @ 'Process,
+        Greeter <- StdoutGreeter @ 'Process
+    ] @ 'Process {
         outer("alice")
         outer("bob")
     }

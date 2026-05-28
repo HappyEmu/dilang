@@ -1,5 +1,5 @@
 // DEC-020: value-method dispatch on a user struct. `p.dist()` / `p.scaled(10)`
-// resolve against the impl methods on the constructed value — no `provide`, no
+// resolve against the impl methods on the constructed value — no `with`, no
 // capability dispatch. `self` is bound to the receiver; method bodies read
 // `self.x` / `self.y`.
 

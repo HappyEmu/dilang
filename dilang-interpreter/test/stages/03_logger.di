@@ -5,7 +5,7 @@ fn greet(name: Str) requires {Logger} {
 }
 
 fn main() {
-    provide { Logger = StdoutLogger @ Process } in {
+    with [ Logger <- StdoutLogger @ 'Process ] @ 'Process {
         greet("world")
     }
 }

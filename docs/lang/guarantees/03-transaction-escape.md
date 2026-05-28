@@ -1,17 +1,15 @@
 # 03 — Transaction handle escaping its block
 
-> **Preliminary syntax note.** This vignette uses the proposed `with [ ... ] @ Scope { body }` form in place of the current `provide @ Scope { ... } in { body }` directive. The semantics are identical. See the [guarantees README](./README.md#preliminary-syntax-note).
-
 ## Scenario
 
-A money-transfer service performs two updates inside a transaction and writes an audit row afterwards. The transaction is scoped: BEGIN runs on entry to a `@ Transaction` block; COMMIT runs on normal exit; ROLLBACK runs on raised exit. The underlying connection is acquired from a pool when the block opens and returned to the pool when it closes (design §3.6.5).
+A money-transfer service performs two updates inside a transaction and writes an audit row afterwards. The transaction is scoped: BEGIN runs on entry to a `@ 'Transaction` block; COMMIT runs on normal exit; ROLLBACK runs on raised exit. The underlying connection is acquired from a pool when the block opens and returned to the pool when it closes (design §3.6.5).
 
 Given:
 
 ```di
-scope Transaction
+scope 'Transaction under 'Process
 
-capability DbTx @ Transaction {
+capability DbTx @ 'Transaction {
     fn execute(stmt: Sql)
     fn last_id() -> Int64
 }
@@ -35,13 +33,13 @@ fn transfer(from: UserId, to: UserId, amount: Money) -> Receipt
     raises   {DbFailure}
 {
     let receipt =
-        with [ DbTx = PgTransaction { conn: WriteDb.acquire() } ] @ Transaction {
+        with [ DbTx <- PgTransaction { conn: WriteDb.acquire() } ] @ 'Transaction {
             DbTx.execute(sql"UPDATE accounts SET balance = balance - ${amount} WHERE id = ${from}")
             DbTx.execute(sql"UPDATE accounts SET balance = balance + ${amount} WHERE id = ${to}")
             Receipt { id: DbTx.last_id() }
         }
 
-    // ← out of the @ Transaction block; COMMIT has already run; conn is in the pool
+    // ← out of the @ 'Transaction block; COMMIT has already run; conn is in the pool
     DbTx.execute(sql"INSERT INTO audit (event) VALUES ('transfer')")
 
     receipt
@@ -57,31 +55,31 @@ ORM-style "lazy" patterns make this worse: a query object returned from inside t
 
 ## What dilang says
 
-`DbTx` is declared `@ Transaction` (design §2.8.2). The trailing call to `DbTx.execute(...)` sits outside the `with` block. The compiler walks outward from that line looking for an enclosing `@ Transaction` scope. There is none — the surrounding scope is whatever the caller of `transfer` had, which does not include `@ Transaction`. Per design §4.1.3:
+`DbTx` is declared `@ 'Transaction` (design §2.8.2). The trailing call to `DbTx.execute(...)` sits outside the `with` block. The compiler walks outward from that line looking for an enclosing `@ 'Transaction` scope. There is none — the surrounding scope is `@ 'Process` or whatever the caller of `transfer` had, which does not include `@ 'Transaction`. Per design §4.1.3:
 
 ```
-error: capability `DbTx` is bound only inside `@ Transaction` scopes,
-       but used here from outside any `@ Transaction` block
+error: capability `DbTx` is bound only inside `@ 'Transaction` scopes,
+       but used here from outside any `@ 'Transaction` block
   --> transfer.di:14:5
    |
 14 |     DbTx.execute(sql"INSERT INTO audit (event) VALUES ('transfer')")
    |     ^^^^ `DbTx.execute` requires {DbTx}, not available here
    |
-note: the closest `@ Transaction` block ends here
+note: the closest `@ 'Transaction` block ends here
   --> transfer.di:12:6
    |
  8 |     let receipt =
- 9 |         with [ DbTx = PgTransaction { conn: WriteDb.acquire() } ] @ Transaction {
+ 9 |         with [ DbTx <- PgTransaction { conn: WriteDb.acquire() } ] @ 'Transaction {
    |         -------------------------------------------------------------------- block starts
 10 |             ...
 11 |             Receipt { id: DbTx.last_id() }
 12 |         }
    |         - block ends; DbTx leaves scope
    |
-note: `DbTx` is declared `@ Transaction` here
+note: `DbTx` is declared `@ 'Transaction` here
   --> caps.di:5:1
    |
- 5 | capability DbTx @ Transaction { ... }
+ 5 | capability DbTx @ 'Transaction { ... }
 ```
 
 The error points at both the offending call and the block exit, so the relationship is obvious.
@@ -95,7 +93,7 @@ fn transfer(from: UserId, to: UserId, amount: Money) -> Receipt
     requires {WriteDb, TaskRunner}
     raises   {DbFailure}
 {
-    with [ DbTx = PgTransaction { conn: WriteDb.acquire() } ] @ Transaction {
+    with [ DbTx <- PgTransaction { conn: WriteDb.acquire() } ] @ 'Transaction {
         DbTx.execute(sql"UPDATE accounts SET balance = balance - ${amount} WHERE id = ${from}")
         DbTx.execute(sql"UPDATE accounts SET balance = balance + ${amount} WHERE id = ${to}")
 
@@ -117,7 +115,7 @@ error: closure has `requires {DbTx}` but expected `requires {}`
 11 |         TaskRunner.spawn(|| {
    |         ----------------- expected: fn() -> Unit requires {} raises {}
 12 |             DbTx.execute(sql"INSERT INTO audit (event) VALUES ('transfer')")
-   |             ^^^^ closure uses DbTx, which is @ Transaction-scoped
+   |             ^^^^ closure uses DbTx, which is @ 'Transaction-scoped
 13 |         })
 ```
 
@@ -132,7 +130,7 @@ fn transfer(from: UserId, to: UserId, amount: Money) -> Receipt
     requires {WriteDb}
     raises   {DbFailure}
 {
-    with [ DbTx = PgTransaction { conn: WriteDb.acquire() } ] @ Transaction {
+    with [ DbTx <- PgTransaction { conn: WriteDb.acquire() } ] @ 'Transaction {
         DbTx.execute(sql"UPDATE accounts SET balance = balance - ${amount} WHERE id = ${from}")
         DbTx.execute(sql"UPDATE accounts SET balance = balance + ${amount} WHERE id = ${to}")
         DbTx.execute(sql"INSERT INTO audit (event) VALUES ('transfer')")
@@ -149,7 +147,7 @@ fn transfer(from: UserId, to: UserId, amount: Money) -> Receipt
     raises   {DbFailure}
 {
     let receipt =
-        with [ DbTx = PgTransaction { conn: WriteDb.acquire() } ] @ Transaction {
+        with [ DbTx <- PgTransaction { conn: WriteDb.acquire() } ] @ 'Transaction {
             DbTx.execute(sql"UPDATE accounts SET balance = balance - ${amount} WHERE id = ${from}")
             DbTx.execute(sql"UPDATE accounts SET balance = balance + ${amount} WHERE id = ${to}")
             Receipt { id: DbTx.last_id() }
@@ -167,7 +165,7 @@ fn transfer(from: UserId, to: UserId, amount: Money) -> Receipt
 
 Three production failure modes collapse into the two compile errors above.
 
-1. **Use-after-commit on a stale handle.** Code calls into the transaction object after the `with` / `using` / context-manager block has exited. Drivers vary: some raise, some silently succeed against the pooled connection. In dilang the call does not compile.
+1. **Use-after-commit on a stale handle.** Code calls into the transaction object after the `with` / context-manager block has exited. Drivers vary: some raise, some silently succeed against the pooled connection. In dilang the call does not compile.
 
 2. **Deferred work capturing the transaction.** Closures, spawned tasks, or queued callbacks that touch the transaction handle and execute after the block closes. Caught by row unification: the closure's `requires {DbTx}` cannot be passed where `requires {}` is expected.
 
@@ -181,5 +179,5 @@ Three production failure modes collapse into the two compile errors above.
 - design §3.6.3 (Lifecycle start/shutdown ordering), §3.6.5 (transactions fit naturally)
 - design §3.2 (Effect rows), syntax §1.3 (closure row inference)
 - design §4.1.3 (Using a scoped capability outside its scope)
-- DEC-004 (`@ ScopeName` mandatory on every binding)
-- [Vignette 01](./01-job-vs-request-scope.md), [Vignette 02](./02-cross-tenant-leak.md) — the same scope mechanism applied to different bug classes
+- DEC-004 (`@ 'ScopeName` mandatory on every binding)
+- [Vignette 01](./01-job-vs-request-scope.md), [Vignette 02](./02-cross-tenant-leak.md) — the same scope 'mechanism under 'Process applied to different bug classes

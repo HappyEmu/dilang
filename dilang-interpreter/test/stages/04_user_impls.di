@@ -13,8 +13,8 @@ impl Greeter for PrefixedGreeter {
 }
 
 fn main() {
-    provide {
-        Stamper = ExclaimStamper @ Process
-        Greeter = PrefixedGreeter @ Process
-    } in { Greeter.say("hello") }
+    with [
+        Stamper <- ExclaimStamper @ 'Process
+        Greeter <- PrefixedGreeter @ 'Process
+    ] @ 'Process { Greeter.say("hello") }
 }

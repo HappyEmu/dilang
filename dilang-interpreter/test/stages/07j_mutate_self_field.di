@@ -15,7 +15,7 @@ impl Counter for Tally {
 }
 
 fn main() {
-    provide { Counter = Tally { count: 0 } @ Process } in {
+    with [ Counter <- Tally { count: 0 } @ 'Process ] @ 'Process {
         Counter.bump()
         Counter.bump()
         Counter.bump()

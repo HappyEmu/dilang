@@ -8,9 +8,9 @@ impl Greeter for AdornedGreeter {
 }
 
 fn main() {
-    provide {
-        Greeter = AdornedGreeter { prefix: "[", suffix: "]", mark: "!" } @ Process
-    } in {
+    with [
+        Greeter <- AdornedGreeter { prefix: "[", suffix: "]", mark: "!" } @ 'Process
+    ] @ 'Process {
         Greeter.say("hi")
         Greeter.say("bye")
     }

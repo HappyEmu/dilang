@@ -16,17 +16,21 @@ Every entry follows the same five-section structure:
 
 A good vignette fits in roughly 250 lines including code. Beyond that, split into two.
 
-## Preliminary syntax note
+## Syntax note
 
-Some vignettes use the proposed `with [ ... ] @ Scope { body }` form rather than the current `provide @ Scope { ... } in { body }` directive. The semantics are unchanged — translate freely:
+Vignettes use the accepted [RFC-001](../rfcs/001-with-scoped-wiring.md)
+scoped wiring syntax:
 
+```di
+with [
+    Cap <- expr
+] @ 'Scope {
+    body
+}
 ```
-with [ Cap = expr, ... ] @ Scope { body }
-↔
-provide @ Scope { Cap = expr ... } in { body }
-```
 
-The with-form is preferred in new vignettes for readability. When the surface syntax stabilises in a future DEC, vignettes will be updated wholesale.
+The semantics are lexical capability binding, left-to-right construction,
+scope-local lifetime, and later-entry override.
 
 ## Index
 

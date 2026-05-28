@@ -36,8 +36,8 @@ capability Logger {
     fn error(msg: Str, err: Error, fields: Map<Str, Json> = {})
 }
 
-capability Clock @ Process { fn now() -> Instant }
-capability IdGen @ Process { fn next() -> Uuid }
+capability Clock @ 'Process { fn now() -> Instant }
+capability IdGen @ 'Process { fn next() -> Uuid }
 ```
 
 ### 2.2 Database
@@ -74,7 +74,7 @@ capability UserRepo {
 ### 2.4 Request context
 
 ```di
-capability RequestCtx @ Request {
+capability RequestCtx @ 'Request {
     fn request_id() -> Uuid
     fn current_user() -> User?
 }
@@ -232,9 +232,7 @@ fn with_auth<R, E>(
         catch DbFailure(_) -> return Response.server_error()
     let user = user ?? return Response.unauthorized()
 
-    provide @ Request {
-        RequestCtx = RequestCtx.with_user(user) @ Request
-    } in {
+    with [RequestCtx <- RequestCtx.with_user(user)] @ 'Request {
         handler()
     }
 }
@@ -302,17 +300,17 @@ fn router() -> Router<{TaskRepo, UserRepo, TokenSigner, Logger, Clock,
 fn main() {
     let rt = FiberRuntime(workers: 8)
 
-    provide {
-        IO          = rt                                     @ Process
-        Logger      = JsonLogger()                           @ Process
-        Clock       = SystemClock()                          @ Process
-        IdGen       = UuidV7Gen()                            @ Process
-        WriteDb     = Postgres(IO.env("DB_URL") ?? "")       @ Process
-        TaskRepo    = PgTaskRepo {}                          @ Process
-        UserRepo    = PgUserRepo {}                          @ Process
-        TokenSigner = Hs256Signer(IO.env("JWT_SECRET")
-                                  ?? panic("JWT_SECRET"))    @ Process
-    } in {
+    with [
+        IO          <- rt
+        Logger      <- JsonLogger()
+        Clock       <- SystemClock()
+        IdGen       <- UuidV7Gen()
+        WriteDb     <- Postgres(IO.env("DB_URL") ?? "")
+        TaskRepo    <- PgTaskRepo {}
+        UserRepo    <- PgUserRepo {}
+        TokenSigner <- Hs256Signer(IO.env("JWT_SECRET")
+                                   ?? panic("JWT_SECRET"))
+    ] @ 'Process {
         serve(8080, router())
     }
 }
@@ -358,9 +356,7 @@ fn handle_conn<R>(sock: Socket, router: Router<R>)
     defer IO.close(sock)
     try with_timeout(30.seconds) {
         let req = read_request(sock)
-        provide @ Request {
-            RequestCtx = RequestCtx.fresh(req) @ Request
-        } in {
+        with [RequestCtx <- RequestCtx.fresh(req)] @ 'Request {
             let resp = with_request_logging(||
                 with_auth(req, ||
                     router.dispatch(req).unwrap_or(Response.not_found())))
@@ -382,7 +378,7 @@ The accept loop is plain `loop { ... }`. No async/await colors any function. The
 A transaction is a `Transaction`-scoped capability whose `Lifecycle` issues `BEGIN`/`COMMIT`/`ROLLBACK`.
 
 ```di
-capability DbTx @ Transaction {
+capability DbTx @ 'Transaction {
     fn execute(sql: Sql) raises {DbError}
     fn query(sql: Sql) -> Rows raises {DbError}
 }
@@ -418,9 +414,7 @@ pub fn transfer_tasks(from: Uuid, to: Uuid)
     requires {WriteDb, Logger}
     raises   {DbFailure}
 {
-    provide @ Transaction {
-        DbTx = PgTransaction { conn: WriteDb.acquire() } @ Transaction
-    } in {
+    with [DbTx <- PgTransaction { conn: WriteDb.acquire() }] @ 'Transaction {
         try {
             DbTx.execute(sql"UPDATE tasks SET owner = ${to} WHERE owner = ${from}")
             DbTx.execute(sql"INSERT INTO audit (event) VALUES ('transfer')")
@@ -437,31 +431,31 @@ No `BEGIN` / `COMMIT` / `ROLLBACK` keywords. No transaction macro. The shape is 
 
 ## 11. Tests
 
-Test setup defines reusable `Wiring` values and splats them with `using`.
+Test setup defines reusable `Wiring` values and spreads them with `...`.
 
 ```di
 fn test_runtime() -> Wiring {
-    provide {
-        IO     = TestIO()                                          @ Process
-        Logger = TestLogger()                                      @ Process
-        Clock  = FixedClock(Instant.parse("2026-05-22T12:00:00Z")) @ Process
-        IdGen  = SeqIdGen([Uuid.parse("t1"), Uuid.parse("t2")])    @ Process
-    }
+    with [
+        IO     <- TestIO()                                          @ 'Process
+        Logger <- TestLogger()                                      @ 'Process
+        Clock  <- FixedClock(Instant.parse("2026-05-22T12:00:00Z")) @ 'Process
+        IdGen  <- SeqIdGen([Uuid.parse("t1"), Uuid.parse("t2")])    @ 'Process
+    ]
 }
 
 fn test_repos() -> Wiring {
     let users = InMemoryUserRepo()
     users.insert(User { id: Uuid.parse("u1"), email: "a@b", name: "Alice" })
-    provide {
-        TaskRepo = InMemoryTaskRepo() @ Process
-        UserRepo = users              @ Process
-    }
+    with [
+        TaskRepo <- InMemoryTaskRepo() @ 'Process
+        UserRepo <- users              @ 'Process
+    ]
 }
 
 test "create_task persists with current clock and id" {
-    provide {
-        using test_runtime(), test_repos(),
-    } in {
+    with [
+        ...test_runtime(), ...test_repos(),
+    ] @ 'Process {
         let task = create_task(Uuid.parse("u1"), CreateTaskInput { title: "buy milk" })
         assert task.title == "buy milk"
         assert task.id == Uuid.parse("t1")
@@ -470,9 +464,9 @@ test "create_task persists with current clock and id" {
 }
 
 test "create_task rejects empty title" {
-    provide {
-        using test_runtime(), test_repos(),
-    } in {
+    with [
+        ...test_runtime(), ...test_repos(),
+    ] @ 'Process {
         try create_task(Uuid.parse("u1"), CreateTaskInput { title: "  " }) catch {
             BadInput(reason) -> assert reason == "title is required"
             other            -> assert false, "unexpected: ${other}"
@@ -481,10 +475,10 @@ test "create_task rejects empty title" {
 }
 
 test "create_task fails when owner does not exist" {
-    provide {
-        using test_runtime(), test_repos(),
-        UserRepo = InMemoryUserRepo() @ Process,    // overrides test_repos()'s populated UserRepo
-    } in {
+    with [
+        ...test_runtime(), ...test_repos(),
+        UserRepo <- InMemoryUserRepo(),    // overrides test_repos()'s populated UserRepo
+    ] @ 'Process {
         try create_task(Uuid.parse("u999"), CreateTaskInput { title: "x" }) catch {
             NotFound -> {}
             other    -> assert false, "expected NotFound, got ${other}"
@@ -493,7 +487,7 @@ test "create_task fails when owner does not exist" {
 }
 ```
 
-The production code is reused unchanged in tests. The `IO` impl is a deterministic test runtime; the database is a `Map`; ids and time are deterministic. No mocking framework. No fixture inheritance. Overrides are just bindings placed after the `using` line they shadow.
+The production code is reused unchanged in tests. The `IO` impl is a deterministic test runtime; the database is a `Map`; ids and time are deterministic. No mocking framework. No fixture inheritance. Overrides are just bindings placed after the spread entries they shadow.
 
 -----
 
@@ -509,10 +503,10 @@ The production code is reused unchanged in tests. The `IO` impl is a determinist
 | Row-polymorphic middleware              | `with_request_logging<R, E>` (§5)                    |
 | Request-scoped capability re-binding    | `with_auth` rebinds `RequestCtx` (§5.2)              |
 | `IO` capability (single, like Zig)      | `IO.env`, `IO.bind`, `IO.spawn`, `IO.wait_for_signal`|
-| `provide` at `main`                     | §8                                                   |
+| `with` at `main`                        | §8                                                   |
 | Graceful shutdown with `Group`          | §9                                                   |
 | `defer` on every exit                   | §9 (listener, socket)                                |
 | `with_timeout` derived from cancel      | §9 (drain timeout)                                   |
 | Transactions via scope + Lifecycle      | §10                                                  |
-| `Wiring` composition for tests          | §11 (`using` + lexical override)                     |
+| `Wiring` composition for tests          | §11 (`...` + lexical override)                       |
 | Deterministic test runtime              | §11                                                  |

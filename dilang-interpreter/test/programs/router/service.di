@@ -27,10 +27,10 @@ fn health(_: Request) -> Response { Response { status: 200, body: "ok" } }
 fn echo(req: Request) -> Response { Response { status: 200, body: req.body } }
 
 fn main() {
-    provide {
-        Logger     = StdoutLogger      @ Process
-        HttpServer = BlockingHttpServer @ Process
-    } in {
+    with [
+        Logger     <- StdoutLogger
+        HttpServer <- BlockingHttpServer
+    ] @ 'Process {
         let table = [
             Route { method: "GET",  prefix: "/health", handler: health },
             Route { method: "POST", prefix: "/echo",   handler: echo }

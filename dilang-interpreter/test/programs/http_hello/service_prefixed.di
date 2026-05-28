@@ -13,10 +13,10 @@ impl Logger for PrefixedLogger {
 }
 
 fn main() {
-    provide {
-        Logger = PrefixedLogger { prefix: "[svc] " } @ Process,
-        HttpServer = BlockingHttpServer @ Process
-    } in {
+    with [
+        Logger <- PrefixedLogger { prefix: "[svc] " },
+        HttpServer <- BlockingHttpServer
+    ] @ 'Process {
         HttpServer.serve(18080, |req| {
             Logger.info("handling ${req.path}")
             Response { status: 200, body: "ok" }

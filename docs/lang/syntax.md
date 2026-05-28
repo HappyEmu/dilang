@@ -4,6 +4,8 @@ A walk through the syntax of every language construct. This is not a formal gram
 
 For the *why* behind these shapes, see [design.md](./design.md). For programs that use them in context, see [examples/](./examples/).
 
+> Syntax update: [RFC-001](./rfcs/001-with-scoped-wiring.md) defines scoped capability provisioning as `with [Cap <- expr] @ 'Scope { ... }`, apostrophe-prefixed lifetime scopes, and `...` Wiring spread.
+
 -----
 
 ## 1. Functions
@@ -119,7 +121,7 @@ capability Logger {
 Shape:
 
 ```di
-capability Name [@ Scope1 | Scope2] [extends Other1 + Other2] [where bounds] {
+capability Name [@ 'Scope1 | 'Scope2] [extends Other1 + Other2] [where bounds] {
     fn required_method(params) -> Return [raises {...}]
     fn defaulted_method(params) -> Return [raises {...}] { body }
 }
@@ -130,9 +132,9 @@ capability Name [@ Scope1 | Scope2] [extends Other1 + Other2] [where bounds] {
 ### 2.2 Scope annotations
 
 ```di
-capability Clock @ Process { fn now() -> Instant }
-capability RequestCtx @ Request { fn request_id() -> Uuid }
-capability Cache @ Process | Request { fn get(key: Str) -> Bytes? }
+capability Clock @ 'Process { fn now() -> Instant }
+capability RequestCtx @ 'Request { fn request_id() -> Uuid }
+capability Cache @ 'Process | 'Request { fn get(key: Str) -> Bytes? }
 ```
 
 No annotation means the capability may be bound in any scope. `@ A | B` means one of the listed scopes.
@@ -155,7 +157,7 @@ A `WriteDb` impl satisfies a `ReadDb` requirement.
 
 ## 3. Traits
 
-Traits and capabilities share syntactic shape but differ in resolution: traits resolve by receiver value, capabilities resolve through `provide` blocks.
+Traits and capabilities share syntactic shape but differ in resolution: traits resolve by receiver value, capabilities resolve through `with` blocks.
 
 ```di
 trait Iterator<T> {
@@ -209,7 +211,7 @@ Fieldless structs may be constructed with the bare name — the empty braces are
 let m = UnitMarker          // equivalent to UnitMarker {}
 ```
 
-This mirrors Rust's unit-struct ergonomics and keeps `provide` blocks readable when an impl carries no configuration.
+This mirrors Rust's unit-struct ergonomics and keeps `with` blocks readable when an impl carries no configuration.
 
 ### 4.2 Basic impl shape
 
@@ -268,7 +270,7 @@ impl ReadDb + WriteDb for Postgres {
 }
 ```
 
-Callers see `requires {ReadDb}` or `requires {WriteDb}` — not `requires {ReadDb, IO, Metrics}`. The private row is satisfied at the `provide` site, not at every call.
+Callers see `requires {ReadDb}` or `requires {WriteDb}` — not `requires {ReadDb, IO, Metrics}`. The private row is satisfied at the `with` site, not at every call.
 
 ### 4.4 Multiple conformance
 
@@ -362,69 +364,69 @@ No implicit conversion. No `?` operator. The verbosity is intentional (see §2.5
 
 -----
 
-## 7. Provide blocks and Wiring values
+## 7. `with` blocks and Wiring values
 
 ### 7.1 Entries
 
-A `provide` block contains a comma- or newline-separated list of entries. Each entry is one of:
+A `with` block contains a comma- or newline-separated list of entries inside `[...]`. Each entry is one of:
 
-- A binding: `Cap = expr @ Scope`
-- A splat: `using <wiring-expr>[, <wiring-expr>...]`
+- A binding: `Cap <- expr [@ 'Scope]`
+- A spread: `...<wiring-expr>`
 
 Entries combine in lexical order; later entries shadow earlier ones on conflict.
 
 ### 7.2 Inline bindings only
 
 ```di
-provide {
-    Database = Postgres { url: IO.env("DB_URL") ?? "" } @ Process
-    Logger   = JsonLogger                               @ Process
-    Clock    = SystemClock                              @ Process
-} in {
+with [
+    Database <- Postgres { url: IO.env("DB_URL") ?? "" }
+    Logger   <- JsonLogger
+    Clock    <- SystemClock
+] @ 'Process {
     serve(8080, router())
 }
 ```
 
-Every binding specifies its scope with `@ ScopeName`. No defaults. RHS shapes follow DEC-009: braces for struct literals (`Postgres { url: ... }`), bare name for fieldless structs (`JsonLogger`), parens for function calls returning impl values.
+When the `with` expression has `@ 'Scope` after the entry list, bindings without their own `@` default to that scope. If there is no default after the entry list, each direct binding must specify `@ 'Scope`. RHS shapes follow DEC-009: braces for struct literals (`Postgres { url: ... }`), bare name for fieldless structs (`JsonLogger`), parens for function calls returning impl values.
 
-### 7.3 Provide targeting a non-Process scope
+### 7.3 `with` targeting a non-Process scope
 
 ```di
-provide @ Request {
-    RequestCtx = fresh_ctx(req) @ Request
-    Tenant     = lookup_tenant(req) @ Request
-} in {
+with [
+    RequestCtx <- fresh_ctx(req)
+    Tenant     <- lookup_tenant(req)
+] @ 'Request {
     handler()
 }
 ```
 
 ### 7.4 Wiring values
 
-A `provide { ... }` with no `in` is a value of type `Wiring`.
+A `with [ ... ]` with no body is a value of type `Wiring`.
 
 ```di
 fn base_runtime() -> Wiring {
     let rt = FiberRuntime { workers: 8 }
-    provide {
-        IO     = rt           @ Process
-        Logger = JsonLogger   @ Process
-        Clock  = SystemClock  @ Process
-    }
+    with [
+        IO     <- rt           @ 'Process
+        Logger <- JsonLogger   @ 'Process
+        Clock  <- SystemClock  @ 'Process
+    ]
 }
 ```
 
-### 7.5 Composing via `using`
+### 7.5 Composing via spread
 
 ```di
-provide {
-    using base_runtime(), pg_repos(),
-    TaskRepo = FailingTaskRepo @ Process,       // overrides the one in pg_repos()
-} in {
+with [
+    ...base_runtime(), ...pg_repos(),
+    TaskRepo <- FailingTaskRepo,       // overrides the one in pg_repos()
+] @ 'Process {
     serve(8080, router())
 }
 ```
 
-`using a(), b()` splats one or more Wirings into the enclosing block. Bindings and `using` directives can appear in any order; lexical position determines override precedence. There is no separate `++` or `with` operator — composition is a `provide`-block construct.
+`...a()` spreads a Wiring into the enclosing block. Bindings and spreads can appear in any order; lexical position determines override precedence. There is no separate `++` operator — composition is a `with`-block construct.
 
 -----
 
@@ -459,7 +461,7 @@ enum Option<T> {
 
 trait Iterator<T> { fn next() -> T? }
 
-capability Cache<K, V> @ Process | Request
+capability Cache<K, V> @ 'Process | 'Request
     where K: Eq + Hash
 {
     fn get(key: K) -> V?
@@ -487,16 +489,16 @@ impl<R> Router<R> {
 ### 9.1 Declaration
 
 ```di
-scope Request
-scope Transaction
-scope HtmlRender
+scope 'Request under 'Process
+scope 'Transaction under 'Process
+scope 'HtmlRender under 'Process
 ```
 
 `Process` is implicit and need not be declared.
 
 ### 9.2 Use
 
-A capability annotated `@ Request` may only be bound inside `provide @ Request { ... }`. The compiler rejects use of a `Request`-scoped capability from `Process` scope.
+A capability annotated `@ 'Request` may only be bound inside `with [...] @ 'Request { ... }`. The compiler rejects use of a `Request`-scoped capability from `Process` scope.
 
 -----
 
@@ -655,7 +657,7 @@ fn handle_conn(sock: Socket) requires {IO, Logger} {
 
 `defer` is **block-scoped**: a deferred expression runs at the end of the smallest enclosing `{ ... }` block, on every exit path from that block — fall-through, `return`, `break`, `continue`, raised error, cancellation, panic. Defers in the same block run in LIFO order (most-recently-registered first). A defer runs to completion before exit continues. See DEC-012.
 
-Each `{ ... }` is its own defer scope: the function body, `if`/`else` branches, `loop`/`while` bodies, `try`/`catch` bodies, `provide ... in { ... }` bodies, and bare block expressions all push a fresh frame.
+Each `{ ... }` is its own defer scope: the function body, `if`/`else` branches, `loop`/`while` bodies, `try`/`catch` bodies, `with [...] { ... }` bodies, and bare block expressions all push a fresh frame.
 
 The deferred expression is evaluated when the defer *fires*, not when it is registered (Zig-style; opposite of Go, where defer arguments are captured at the call site). Reads of mutable state inside a defer body see the state as it is at scope exit. To capture a value at registration, bind it to an immutable local first.
 
@@ -734,7 +736,7 @@ impl Lifecycle for Postgres {
 }
 ```
 
-`start` runs on entry to the `provide` block where the impl is bound, in topological order of `start`-method requires. `shutdown` runs on exit, in reverse order. `ExitReason` distinguishes the exit path.
+`start` runs on entry to the `with` block where the impl is bound, in topological order of `start`-method requires. `shutdown` runs on exit, in reverse order. `ExitReason` distinguishes the exit path.
 
 -----
 

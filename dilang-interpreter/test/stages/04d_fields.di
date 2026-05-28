@@ -6,7 +6,7 @@ impl Logger for PrefixedLogger {
 }
 
 fn main() {
-    provide { Logger = PrefixedLogger { prefix: "app" } @ Process } in {
+    with [ Logger <- PrefixedLogger { prefix: "app" } @ 'Process ] @ 'Process {
         Logger.info("hello")
         Logger.info("world")
     }

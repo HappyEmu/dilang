@@ -20,11 +20,11 @@ Status: Active, split deferred · Cites: design §3.3, §5.2
 Model the runtime as one `IO` capability. v4's twelve-capability split is deferred.
 - Rejected: keep all twelve — dominates docs; obscures core ideas
 
-## DEC-002 — Wiring composition via `using` directive
-Status: Active · Supersedes: v4's `++` / `with` operators · Cites: design §3.5, syntax §7
-`provide { using a(), b(), Cap = expr @ Scope } in { ... }`. Lexical order; later wins.
-- Rejected: `++` / `with` operators — operator soup; three syntaxes for one concept
-- Rejected: unmarked unified `provide { a(), b(), Cap = ... }` — no per-entry signal
+## DEC-002 — Wiring composition via spread entries
+Status: Active · Supersedes: v4's `++` / old `using` directive · Cites: design §3.5, syntax §7, RFC-001
+`with [...a(), ...b(), Cap <- expr] @ 'Scope { ... }`. Lexical order; later wins.
+- Rejected: `++` operators — operator soup; multiple syntaxes for one concept
+- Rejected: unmarked unified `with [a(), b(), Cap <- ...]` — no per-entry signal
 - Rejected: `using` as block-level marker — mixing bindings + Wirings needs special-casing
 
 ## DEC-003 — Compile-time Wiring check via structural tracing
@@ -33,9 +33,10 @@ Status: Active · Cites: design §3.5.4
 - Rejected: row-typed `Wiring<provides: {...}, requires: {...}>` — long boundary signatures
 - Rejected: no static check — defeats the language's premise
 
-## DEC-004 — `@ ScopeName` mandatory on every binding
-Status: Active (carried from v3) · Cites: design §2.8.3
-- Rejected: default to `@ Process` — hides scope at binding site
+## DEC-004 — Scoped `with` defaults and explicit mixed-scope bindings
+Status: Active · Cites: design §2.8.3, syntax §7, RFC-001
+`with [...] @ 'Scope { ... }` gives direct bindings in the entry list a default scope. If a `with` has no default scope, each direct binding must specify `@ 'Scope`.
+- Rejected: default to `@ 'Process` — hides scope at binding site
 
 ## DEC-005 — No `Result<T, E>`; errors flow through `raises`
 Status: Active (carried from v3) · Cites: design §2.5
@@ -89,7 +90,7 @@ Two related open questions about how `defer` interacts with `raises`. Park both 
 
 ## DEC-012 — `defer` is block-scoped
 Status: Active · Cites: syntax §14, design §2.5, §2.10
-A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block (fall-through, `return`, `break`, `continue`, raised error, cancellation, panic). Each `{ ... }` in the surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `provide ... in` body, bare block expression. Defers within a block fire LIFO. The deferred expression is evaluated at fire time, not at registration (so reads of mutable state see scope-exit values).
+A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block (fall-through, `return`, `break`, `continue`, raised error, cancellation, panic). Each `{ ... }` in the surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `with` body, bare block expression. Defers within a block fire LIFO. The deferred expression is evaluated at fire time, not at registration (so reads of mutable state see scope-exit values).
 
 Matches Zig / Swift / D `scope(exit)`. Diverges from Go (function-scoped + arguments captured at registration).
 

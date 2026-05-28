@@ -21,7 +21,7 @@ fn with_retry(times: I64, action: fn() -> I64) -> I64
 }
 
 fn main() {
-    provide { Logger = StdoutLogger @ Process } in {
+    with [ Logger <- StdoutLogger ] @ 'Process {
         let result = with_retry(3, || {
             Logger.info("attempting")
             42

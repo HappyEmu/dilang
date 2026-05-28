@@ -6,7 +6,7 @@
 
 struct User { id: Uuid, name: Str }
 
-capability Cache<K, V> @ Process
+capability Cache<K, V> @ 'Process
     where K: Eq + Hash
 {
     fn get(key: K) -> V?
