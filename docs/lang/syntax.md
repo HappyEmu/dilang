@@ -5,6 +5,8 @@ A walk through the syntax of every language construct. This is not a formal gram
 For the *why* behind these shapes, see [design.md](./design.md). For programs that use them in context, see [examples/](./examples/).
 
 > Syntax update: [RFC-001](./rfcs/001-with-scoped-wiring.md) defines scoped capability provisioning as `with [Cap <- expr] @ 'Scope { ... }`, apostrophe-prefixed lifetime scopes, and `...` Wiring spread.
+>
+> Syntax update: [RFC-002](./rfcs/002-visible-error-propagation.md) makes error propagation visible at the call site — `try` prefixes every fallible call, `catch` attaches to an expression or a block, and propagation past a handler is an explicit `raise` (no silent fall-through). See §6 and design §2.11.
 
 -----
 
@@ -363,6 +365,8 @@ requires {R + S + Metrics}                   // union of two row variables plus 
 
 ## 6. Errors
 
+Defined by [RFC-002](./rfcs/002-visible-error-propagation.md). Every edge by which control leaves a function via the error path is one of exactly two tokens — `raise` (an error is originated or forwarded) and `try` (a fallible call). A reviewer reconstructs a function's whole error control-flow from these two, without reading any callee signature. This is design §2.11 (control flow is linear) in force.
+
 ### 6.1 Raising
 
 ```di
@@ -372,24 +376,72 @@ raise BadInput("title is empty")
 
 `raise X` is an expression of type `Never` (see §11). It can appear anywhere an expression is expected.
 
-### 6.2 Catching
+### 6.2 Propagating with `try`
+
+A call whose `raises` row is non-empty **must** be prefixed with `try`; a call with an empty `raises` row **must not** be (symmetric with row over/under-declaration, design §4.1.2). `try` binds to a single call and means: on failure, control jumps to the nearest enclosing `catch`, or out of the function if none encloses it.
 
 ```di
-try fetch_user(id) catch {
-    NotFound       -> Response.not_found()
-    DbError(e)     -> { Logger.error("db", e); Response.server_error() }
+let user = try Database.lookup(req.id)      // fallible → try required
+let name = render(user.profile)             // infallible → no try
+```
+
+In a chain or nested expression, the position of `try` pins the exact fallible call. Parenthesize to mark a fallible call sitting as a receiver or argument:
+
+```di
+let user = (try Database.query(sql)).first().map(User.from_row) ?? raise NotFound
+try send(try render(try load(id)))          // three fallible calls, innermost-first
+```
+
+The preferred shape gives each fallible step its own `let` line (design §2.11):
+
+```di
+let rows = try Database.query(sql)
+let user = rows.first().map(User.from_row) ?? raise NotFound
+```
+
+### 6.3 Catching
+
+`catch` attaches to a single expression **or** to a block. The fallible statements inside keep their own `try` — the marker describes the call, not whether it is ultimately handled, so a reviewer can still see which line in a handled block is the fallible one.
+
+Expression form:
+
+```di
+let rows = try Database.query(sql) catch {
+    DbError(e) -> Rows.empty()
 }
 ```
 
-The catch must be exhaustive over the inner expression's `raises` row, or the outer function must re-declare any uncaught variants.
-
-### 6.3 Re-tagging at boundaries
+Block form:
 
 ```di
-try Database.query(...) catch DbError(e) -> raise DbFailure(e)
+let report = {
+    let user  = try Database.lookup(req.id)
+    let prefs = try FileSystem.read(user.path)
+    let live  = try HttpClient.get(prefs.url)
+    build_report(user, prefs, live)             // no try → cannot fail
+} catch {
+    DbError(e)  -> Report.stale("db")
+    IoError(e)  -> Report.stale("fs")
+    NetError(e) -> Report.stale("net")
+}
 ```
 
-No implicit conversion. No `?` operator. The verbosity is intentional (see §2.5.3 of design).
+A `catch` must be exhaustive over the errors that reach it. There is no silent fall-through: the only way an error continues past a `catch` is an explicit `raise` arm. To handle one variant and forward the rest, use a catch-all forwarding arm:
+
+```di
+try Database.query(sql) catch {
+    DbError.Timeout(e) -> retry()
+    _ -> raise                              // re-raise whatever else it was
+}
+```
+
+### 6.4 Re-tagging at boundaries
+
+```di
+let row = try Database.query(sql) catch DbError(e) -> raise DbFailure(e)
+```
+
+No implicit conversion. No `?` operator. The re-tag is a visible `raise` at the boundary (see design §2.5.3, DEC-006).
 
 -----
 

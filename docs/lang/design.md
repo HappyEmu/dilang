@@ -108,6 +108,14 @@ This supersedes [archive/capability-language-design-v4.md](./archive/capability-
 
 2.10.3 Named arguments at call sites would be another natural manifestation of this principle but the design is non-trivial (DEC-010 deferred). Until then, the burden falls on writers to use descriptive local names so `deposit(account, amount, currency)` reads at least as `deposit(alice_account, transfer_amount, usd)`.
 
+### 2.11 Control flow is linear
+
+2.11.1 Code should read as a sequence of named steps from top to bottom. The reader follows a program by reading down a column of bindings, not by unwinding nested closures or tracing a chain of combinators. The straight line is the dominant control-flow shape; branching and early exit are punctuation on it, not a re-nesting of it.
+
+2.11.2 This is why error propagation goes through `raise` and `try` over effect rows rather than a `Result<T, E>` threaded through `.and_then`/`.map` (§2.5, DEC-006). A `try`-marked call returns its success value directly, so the next step binds it with a plain `let` and uses it by name — there is no wrapper to unwrap and no closure to nest the continuation in. The row-based error model is the mechanism; linear flow is the property it buys. Early-exit forms — `return`, `raise`, `?? raise`, `?? return` — are expressions of type `Never` precisely so they slot into the straight line instead of forcing the success path to nest inside a handler.
+
+2.11.3 Linear-with-named-intermediates is the default, and usually the more legible one: a named local reads better at review than an anonymous closure parameter introduced right-to-left. But it is a default, not a law. Some compositions are genuinely clearer as a chain — a short pipeline of pure transforms whose intermediate names would add nothing — and forcing a `let` on every step there is its own kind of noise. The intent is to give chaining first-class support with a dedicated form (a pipeline/method-chain syntax, deferred and not yet designed) rather than to ban it; until that exists, prefer named steps and chain only where a name would be pure ceremony. Whatever that form turns out to be, it carries one hard constraint: it may drop the intermediate *names*, never the visibility of which calls can fail — the error-propagation marker stays on each fallible link in a chain exactly as it does on each `let` line (RFC-002). This principle is §2.10 applied to control flow: optimize for the reader, whichever shape serves them on the line in question.
+
 -----
 
 ## 3. Conceptual model
@@ -263,6 +271,10 @@ This section lists real questions the design does not yet answer. None of them b
 ### 5.10 Tooling
 
 5.10.1 IDE support for visualizing capability flow, scope annotations, effect rows, and closure capability surfaces does not exist. This is critical for the language to be pleasant in practice.
+
+### 5.11 Scope-anchored error routing
+
+5.11.1 Errors currently propagate to the nearest enclosing `catch` (RFC-002 §1.2). A `raise … to 'Scope` form could route an error past intermediate handlers straight to a handler installed at a named scope, recorded in the row as `raises {DbError to 'Transaction}` (general shape `raises {E to 'Scope}`) — the error-path dual of scope-anchored capabilities (§3.1, RFC-001 §4.2). Explored as future work in [RFC-002 §7](./rfcs/002-visible-error-propagation.md) item 8; to be validated against real use cases before committing to a shape.
 
 -----
 

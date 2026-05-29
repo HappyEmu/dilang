@@ -207,3 +207,15 @@ Interpreter: a second `decl` production `IMPL IDENT LBRACE ... RBRACE` (`parser.
 - Rejected: require a marker capability on value types — implies `with`-resolution that never happens; misleads the reader about how the methods are found.
 - Rejected: allow `impl Cap for Type` with `Cap` undeclared as the idiom — works only by absence of validation; a future "impl names a known interface" check would break it, and it still reads as if `Cap` means something.
 - Rejected: wait for `trait` and model these as traits — inherent (no-interface) methods and trait (named-interface) methods are distinct concepts; Rust keeps both, and the no-interface case is the common one for a program's own value types.
+
+## DEC-023 — Visible error propagation (`try` at every fallible call)
+Status: Proposed · Cites: RFC-002, design §2.5, §2.11, syntax §6, DEC-006, DEC-011
+A call whose `raises` row is non-empty must be prefixed with `try`; a call with an empty row must not be (symmetric with row over/under-declaration, design §4.1.2). `try` binds to a single call and means "on failure, jump to the nearest enclosing `catch`, or out of the function if none." `catch` attaches to an expression or a block; the fallible statements inside keep their own `try`. A `catch` must be exhaustive, and there is no silent fall-through — the only way an error continues past a handler is an explicit `raise` arm. Result: every error-escape edge is one of two tokens, `try` (a fallible call) or `raise` (an error originated/forwarded), so a reviewer reconstructs a function's error control-flow without reading callee signatures. This is the visibility counterpart to DEC-006 (which keeps the *conversion* at a boundary visible; this keeps *propagation* visible) and gives `errdefer` (DEC-011) a precise trigger: an escape via `try`/`raise`.
+
+Tightens syntax §6.2: drops the old "or the outer function re-declares uncaught variants" allowance, which was silent propagation. Enforcement (the try-required / try-forbidden biconditional) needs each call's `raises` row, so the check lands with the typechecker (cf. DEC-010); until then the interpreter parses `try` permissively.
+
+- Rejected: `try` means "escapes the enclosing function," so a fully-handled call drops its marker — re-hides which statement is fallible inside handling blocks, the place it matters most (RFC-002 §3.1).
+- Rejected: keep §6.2 silent fall-through (uncaught variants propagate when the function re-declares them) — invisible propagation with extra steps, the exact thing this removes (RFC-002 §3.2).
+- Rejected: a leading `try` on catch-constructs to mark residual escape — redundant once propagation past a handler is always an explicit `raise` (RFC-002 §3.3).
+- Rejected: `try` as a low-precedence whole-expression operator — cannot say *which* sub-call is fallible, the whole point (RFC-002 §3.4).
+- Rejected: `Result<T, E>` + `?`/combinator chaining — hides conversion boundaries (DEC-006) and pushes code into nested combinator chains, against linear flow (design §2.11).

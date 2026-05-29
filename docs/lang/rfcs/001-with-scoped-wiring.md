@@ -410,6 +410,8 @@ fn transfer(req: TransferRequest) -> Receipt
 `DbTx` cannot be passed to a longer-lived scheduler unless their function type
 allows the `'Transaction` requirement.
 
+> Note: the error-handling shape in this example predates [RFC-002](./002-visible-error-propagation.md). Under RFC-002 the two `DbTx.execute` calls each carry their own `try`; see RFC-002 §4.2 for the migrated form. The wiring/scoping this section defines is unaffected.
+
 -----
 
 ## 5. Showcase examples
