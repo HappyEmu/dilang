@@ -2,18 +2,26 @@
 
 A tree-walking interpreter in OCaml 5 + Eio that grows one concept at a time. Each stage has a small `.di` program demonstrating only the constructs added at that stage. The interpreter must run that program at the end of the stage.
 
-References: design §§1–6, syntax §§1–17, DEC-001..008, examples/01-layered-backend, playground/01..09.
+References: design §§1–6, syntax §§1–17, DEC-001..022, RFC-001 (`with` scoped wiring), examples/01-layered-backend, playground/01..09.
+
+> **Status (2026-05):** Stages 1–11 and Milestone 11.5 are implemented and green
+> (`dune build && dune runtest` from `dilang-interpreter/`, **138 tests**). Stages
+> 12–19 and the type-checker phase are not yet built; Stage 12 is the active next
+> stage. Surface syntax in this plan follows **RFC-001** (`with [ Cap <- impl ] @
+> 'Scope { body }`, apostrophe-prefixed lifetimes); the older `provide … in …`
+> shown in earlier drafts is gone from the grammar. For shipped stages the
+> authoritative reference is the code and `docs/lang/{syntax,decisions}.md`.
 
 -----
 
 ## 0. Why this shape
 
-Dilang has two hard semantic moves: capability rows resolved through lexical `provide` blocks, and suspension without function coloring via the `IO` capability. Tree-walking sidesteps the type-checker problem (defer to a later phase) and Eio's effect-handler scheduler maps the suspension story almost 1:1:
+Dilang has two hard semantic moves: capability rows resolved through lexical `with` blocks (RFC-001; formerly `provide`), and suspension without function coloring via the `IO` capability. Tree-walking sidesteps the type-checker problem (defer to a later phase) and Eio's effect-handler scheduler maps the suspension story almost 1:1:
 
 | Dilang construct                         | OCaml/Eio mechanism                                         |
 |------------------------------------------|-------------------------------------------------------------|
 | Capability stack lookup                  | `cap_env` = list of `cap_frame` walked outside-in           |
-| `provide { ... } in { body }`            | Open `Eio.Switch.t`, push frame, run `start`s, eval body    |
+| `with [ ... ] @ 'Scope { body }`         | Open `Eio.Switch.t`, push frame, run `start`s, eval body    |
 | `Lifecycle.shutdown` in reverse order    | `Eio.Switch.on_release` (LIFO) per started impl             |
 | `with_cancel`, `tok.trip()`              | Switch's cancel context; `Eio.Cancel.cancel`                |
 | `uncancellable { ... }`                  | `Eio.Cancel.protect`                                        |
@@ -52,8 +60,8 @@ The stage list:
 |---|--------------------------------------|----------------------------------------------------------------------|
 | 1 | Arithmetic and bindings              | `fn`, `let`, literals, ops, `print` intrinsic                        |
 | 2 | Functions and interpolation          | params, return values, `"${x}"`                                      |
-| 3 | First capability                     | `capability`, `provide ... in ...`, `Cap.method`, `@ Process`        |
-| 4 | User impls and composition           | `struct`, `impl X for T`, impl-private `requires`, `extends`, multi-binding `provide` |
+| 3 | First capability                     | `capability`, `with [ Cap <- impl ] @ 'Process { … }`, `Cap.method`  |
+| 4 | User impls and composition           | `struct`, `impl X for T`, inherent `impl T {…}` (DEC-022), impl-private `requires`, `extends`, multi-binding `with`, value-method dispatch (DEC-020) |
 | 5 | Errors and Option                    | `enum`, `raise`, `try ... catch`, `Never`, `T?`, `??`, `?.`          |
 | 6 | Defer                                | `defer`                                                              |
 | 7 | Assignment and loops                 | `x = rhs`, `loop`, `while`, `break`, `continue`                      |
@@ -62,17 +70,19 @@ The stage list:
 | 10 | Closures                            | `\|x\| body`, function-type values, capability capture              |
 | 11 | HTTP server and client               | `HttpServer`, `HttpClient`, `Request`, `Response`, `HttpError`      |
 | — | **Milestone 11.5** — HTTP service with router | no new features; first ship-worthy program                |
-| 12 | Scopes                              | `scope X`, `@ X` on caps and bindings, `provide @ X`                 |
+| 12 | Scopes                              | `scope 'X under 'Parent`, `@ 'X` on caps and bindings, `with […] @ 'X` |
 | 13 | Lifecycle                           | `Lifecycle` impls, `start`/`shutdown`, `ExitReason`, topo order      |
-| 14 | Wiring values                       | `provide { ... }` w/o body → `Wiring`, `using w1, w2`, lexical override |
-| — | **Milestone 14.5** — service with `@ Request`, DB pool, dev/test/prod wirings | no new features        |
+| 14 | Wiring values                       | `with [ … ]` w/o body → `Wiring`, `...spread`, lexical override      |
+| — | **Milestone 14.5** — service with `@ 'Request`, DB pool, dev/test/prod wirings | no new features        |
 | 15 | Concurrency via IO                  | `IO.spawn`, `Future`, `Group`, `Mutex`; concurrent HTTP impl         |
 | 16 | Cancellation                        | `with_cancel`, `Cancelled`, `uncancellable`, `with_timeout`, `select` |
 | 17 | Streams                             | `stream { yield }`, `for x in stream`                                |
 | 18 | Stdin and filesystem capabilities   | `StdinReader`, `FsRead`, `FsWrite`                                   |
 | 19 | Tests as a top-level form           | `test "..." { ... }`, `assert`, mock backend                         |
 
-Plus a final non-stage: **future phase**, the static type checker, which consumes the AST and enforces what the interpreter currently trusts.
+Plus two non-stage future items:
+- **The static type checker** — consumes the AST and enforces what the interpreter currently trusts (rows, scope-escape, exhaustiveness).
+- **The trait system** — *design not yet settled.* A named interface resolved by receiver value (as opposed to `capability`, which resolves through `with` blocks). The runtime mechanism it would reuse already exists — value-method dispatch (DEC-020) — but the surface design is open (see Open Questions). syntax.md §3 sketches a candidate shape (`trait`, `extends`, `Self`, default bodies), and the AST reserves a `DTrait` node, but **no `trait` keyword, parser rule, or eval path is implemented** — only `capability` exists as an interface decl. Not scheduled as a numbered stage until the design lands.
 
 ### Reshuffle rationale (post-Stage-6)
 
@@ -90,7 +100,7 @@ Stages 11 through 19 all sharpen the same artefact: a backend HTTP service. The 
 |-------------|-----------------------|
 | 11 | Responds to `curl`; single connection at a time; stateless handler |
 | 11.5 (milestone) | Route table, query parsing, JSON-shaped responses |
-| 12 (scopes) | `@ Request` bindings around each handler (`RequestId`, scoped logger) |
+| 12 (scopes) | `@ 'Request` bindings around each handler (`RequestId`, scoped logger) |
 | 13 (Lifecycle) | DB connection pool with `start`/`shutdown` |
 | 14 (Wiring) | `dev_runtime()` / `prod_runtime()` / `test_runtime()` selected at `main` |
 | 14.5 (milestone) | Complete service with all of the above, manually exercised |
@@ -98,13 +108,13 @@ Stages 11 through 19 all sharpen the same artefact: a backend HTTP service. The 
 | 16 (cancellation) | Per-request timeouts, graceful shutdown |
 | 17 (streams) | Chunked responses, server-sent events |
 | 18 (stdin/fs) | Config files, log file output |
-| 19 (tests) | `test "..." { provide ... } in { ... }`, mock HTTP client |
+| 19 (tests) | `test "..." = with [ ... ] { ... }`, mock HTTP client |
 
 Each stage's example program is a small delta on the previous one, not a fresh toy.
 
 -----
 
-## Stage 1 — Arithmetic and bindings
+## Stage 1 — Arithmetic and bindings  ✅ *implemented*
 
 ### Example
 
@@ -181,7 +191,7 @@ Everything else.
 
 -----
 
-## Stage 2 — Functions and interpolation
+## Stage 2 — Functions and interpolation  ✅ *implemented*
 
 ### Example
 
@@ -247,7 +257,7 @@ Closures (Stage 10), generic functions, `requires`/`raises` (parsed and ignored)
 
 -----
 
-## Stage 3 — First capability
+## Stage 3 — First capability  ✅ *implemented*
 
 ### Example
 
@@ -261,9 +271,9 @@ fn greet(name: Str) requires {Logger} {
 }
 
 fn main() {
-    provide {
-        Logger = StdoutLogger() @ Process
-    } in {
+    with [
+        Logger <- StdoutLogger
+    ] @ 'Process {
         greet("world")
     }
 }
@@ -273,7 +283,9 @@ Expected: `hello, world`.
 
 ### What's new
 
-`capability X { fn m(...) }` declarations, `provide { Cap = impl @ Scope } in { body }`, `Cap.method(args)` dispatch syntax, `@ Process`. `requires {Logger}` is parsed but not enforced at runtime; lookup will fail if it's missing at the call site, with a clearer message than name-resolution would give.
+`capability X { fn m(...) }` declarations, `with [ Cap <- impl ] @ 'Scope { body }` (RFC-001), `Cap.method(args)` dispatch syntax, the `'Process` lifetime. `requires {Logger}` is parsed but not enforced at runtime; lookup will fail if it's missing at the call site, with a clearer message than name-resolution would give.
+
+(`StdoutLogger` is written bare because it is a fieldless struct — DEC-009: fieldless structs construct as `Foo`, structs with fields as `Foo { … }`; `()` is only ever a call. This is independent of whether the impl is host- or user-defined.)
 
 This is the first **real** Dilang program. After this stage the interpreter has the language's core idea working.
 
@@ -285,11 +297,13 @@ AST additions:
 type expr =
   | ...
   | CapCall of { cap : ident; method_ : ident; args : expr list }
-  | Provide of { entries : provide_entry list; scope : ident option;
-                 body : expr option }
+  (* RFC-001: the implemented node is `WithCaps` (formerly `Provide`). *)
+  | WithCaps of { entries : with_entry list; scope : lifetime option;
+                  body : expr option }
 
-and provide_entry =
-  | Binding of { cap : ident; rhs : expr; scope : ident }
+and with_entry =
+  | Binding of { cap : ident; rhs : expr; scope : lifetime option }   (* Cap <- rhs [@ 'Scope] *)
+  | Spread  of expr                                                   (* ...wiring_expr *)
 
 type decl = ... | DCap of cap_decl
 
@@ -302,7 +316,7 @@ Env addition:
 
 ```ocaml
 type cap_frame = {
-  scope    : ident;                    (* "Process" *)
+  scope    : ident;                    (* "'Process" *)
   bindings : (ident * impl_value) list;
   switch   : Eio.Switch.t;             (* this frame's switch; mostly for later stages *)
 }
@@ -313,9 +327,9 @@ type env = { values : ...; caps : cap_frame list }
 Eval:
 
 ```ocaml
-| Provide { entries; scope; body = Some b } ->
+| WithCaps { entries; scope; body = Some b } ->
     Eio.Switch.run @@ fun sw ->
-      let scope_name = Option.value scope ~default:"Process" in
+      let scope_name = Option.value scope ~default:"'Process" in
       let bindings = List.map (eval_entry ctx) entries in
       let frame = { scope = scope_name; bindings; switch = sw } in
       let ctx' = push_frame ctx frame in
@@ -338,15 +352,15 @@ let stdout_logger () : impl_value = {
 }
 ```
 
-Constructor registration: a single host-constructor table mapping `"StdoutLogger" -> (args -> impl_value)`. Programs invoking `StdoutLogger()` look up this table.
+Constructor registration: a single host-constructor table mapping `"StdoutLogger" -> (args -> impl_value)`. A bare `StdoutLogger` (fieldless construction, DEC-009) looks up this table.
 
 ### Deferred
 
-User-defined impls (Stage 4), capability `extends` (Stage 4), impl-private `requires` (Stage 4), Wiring values (Stage 14), scopes other than `Process` (Stage 12), Lifecycle (Stage 13).
+User-defined impls (Stage 4), capability `extends` (Stage 4), impl-private `requires` (Stage 4), Wiring values (Stage 14), scopes other than `'Process` (Stage 12), Lifecycle (Stage 13).
 
 -----
 
-## Stage 4 — User impls and composition
+## Stage 4 — User impls and composition  ✅ *implemented*
 
 ### Example
 
@@ -371,10 +385,10 @@ impl Greeter for PrefixedGreeter {
 }
 
 fn main() {
-    provide {
-        Stamper = ExclaimStamper() @ Process
-        Greeter = PrefixedGreeter() @ Process
-    } in {
+    with [
+        Stamper <- ExclaimStamper
+        Greeter <- PrefixedGreeter
+    ] @ 'Process {
         Greeter.say("hello")
     }
 }
@@ -399,17 +413,21 @@ fn show() requires {ReadDb} {                  // demands only ReadDb
 }
 
 fn main() {
-    provide { WriteDb = EchoDb() @ Process } in { show() }      // binding WriteDb also satisfies ReadDb
+    with [ WriteDb <- EchoDb ] @ 'Process { show() }      // binding WriteDb also satisfies ReadDb
 }
 ```
 
 ### What's new
 
-`struct T { fields }`, `impl Cap1 [+ Cap2] for T`, impl-private `requires` (a row on the impl block, syntax §4.2), capability `extends` (syntax §2.3), multi-binding `provide` blocks where later bindings can reference earlier ones (syntax §7.1, §4.1.7).
+`struct T { fields }`, `impl Cap1 [+ Cap2] for T`, impl-private `requires` (a row on the impl block, syntax §4.2), capability `extends` (syntax §2.3), multi-binding `with [ … ]` blocks where later bindings can reference earlier ones (syntax §7.1, §4.1.7).
+
+**Inherent impls (DEC-022).** A bare `impl T { fn … }` — no `for`, no interface — declares a type's own methods, reached by receiver via value-method dispatch (below). This is the no-interface form, orthogonal to the eventual `trait` (which is still unimplemented — only `capability` exists as an interface decl). It removed the old "marker capability" hack from value types. One token after `impl IDENT` disambiguates inherent (`LBRACE`) from `impl Cap for T` (`FOR`/`PLUS`); `caps = []` on the impl is inert at runtime.
+
+**Value-method dispatch (DEC-020).** `s.f(args)` on any struct/impl value resolves `f` against the value's methods (inherent or `impl Cap for T`), not only through capability dispatch. Value-dispatched user methods run with the **caller's** caps (the value was never wired through a `with`), whereas a capability-dispatched method runs with the impl's captured `cap_env`. Rust method/field rule: `s.f(args)` is always a method call; a field holding a function is invoked `(s.f)(args)`.
 
 This is the stage where the **cap-env capture pattern** is established — the critical mechanic of Dilang's runtime model:
 
-When evaluating `Greeter = PrefixedGreeter() @ Process`, the impl value records the **capability environment as of that binding point**, which includes the just-added `Stamper` binding. Calls to `Greeter.say(...)` later dispatch into the impl, whose body uses `Stamper.stamp(...)` — and that `Stamper` resolves against the captured environment, not against the caller's environment.
+When evaluating `Greeter <- PrefixedGreeter @ 'Process`, the impl value records the **capability environment as of that binding point**, which includes the just-added `Stamper` binding. Calls to `Greeter.say(...)` later dispatch into the impl, whose body uses `Stamper.stamp(...)` — and that `Stamper` resolves against the captured environment, not against the caller's environment.
 
 ### Interpreter changes
 
@@ -433,16 +451,16 @@ Resolution pass:
 
 - Build `impls_by_cap : (cap, impl_decl list) Hashtbl.t`.
 - Compute extension closure: `ext_of : cap -> cap set`. A binding under cap `C` satisfies `C'` if `C' ∈ ext_of C`.
-- Reject forward references inside a provide block (each binding sees only previous ones).
+- Reject forward references inside a `with` block (each binding sees only previous ones).
 
 Eval changes:
 
-- `Provide` block now builds bindings *left to right*, with each binding's RHS evaluated against the frame as it stands so far. The impl value captures `cap_env = current_caps_with_partial_frame`.
+- The `with [ … ]` block builds bindings *left to right*, with each binding's RHS evaluated against the frame as it stands so far. The impl value captures `cap_env = current_caps_with_partial_frame`. (Spread entries `...wiring_expr` splice a `Wiring`'s recorded bindings at their lexical position — Stage 14.)
 
 ```ocaml
-let eval_provide_block ctx ~scope ~entries ~body =
+let eval_with_block ctx ~scope ~entries ~body =
   Eio.Switch.run @@ fun sw ->
-    let scope_name = Option.value scope ~default:"Process" in
+    let scope_name = Option.value scope ~default:"'Process" in
     let built = ref [] in
     List.iter (fun (Binding { cap; rhs; scope = _ }) ->
       let partial = { scope = scope_name; bindings = List.rev !built; switch = sw } in
@@ -476,11 +494,11 @@ Host stdlib: no new constructors; users can now write their own impls in Dilang.
 
 ### Deferred
 
-Generic impls (Stage 10 via row vars, full generics deferred to type-checker phase), `extends` chains longer than one link (works the same way), trait dispatch on values (`value.method()`) — limited to capability-style for now.
+Generic impls (Stage 10 via row vars, full generics deferred to type-checker phase), `extends` chains longer than one link (works the same way). *(Value-method dispatch `value.method()` — once listed here as deferred — is now implemented, DEC-020; see "What's new" above. A named `trait` interface resolved by receiver is still unbuilt and would reuse the same dispatch mechanism.)*
 
 -----
 
-## Stage 5 — Errors and Option
+## Stage 5 — Errors and Option  ✅ *implemented*
 
 ### Example
 
@@ -522,7 +540,7 @@ missing
 
 ### What's new
 
-`enum E { Variant1; Variant2(payload: T) }`, `raise X(args)`, `try ... catch { Variant -> arm; ... }`, the `Never` type via `raise` and `return`, `Option<T>` with sugar `T?`, `None`/`Some(x)`, `??` (null-coalescing with `Never`-RHS support), `?.` (optional chain/call), `if/else`.
+`enum E { Variant1, Variant2(payload: T) }` (variants comma- or newline-separated, never `;`), `raise X(args)`, `try { … } catch { Variant -> arm, … }` (arms comma- or newline-separated; `_ -> arm` is the wildcard; a single arm may also be written unbraced, `catch Variant(e) -> arm`), the `Never` type via `raise` and `return`, `Option<T>` with sugar `T?`, `None`/`Some(x)`, `??` (null-coalescing with `Never`-RHS support), `?.` (optional chain/call), `if/else`.
 
 ### Interpreter changes
 
@@ -587,7 +605,7 @@ Pattern matching on structs/tuples (add when needed by an example), nested patte
 
 -----
 
-## Stage 6 — Defer
+## Stage 6 — Defer  ✅ *implemented*
 
 ### Example
 
@@ -621,7 +639,7 @@ risky cleanup
 caught
 ```
 
-`defer` is **block-scoped** — see DEC-012 (matches Zig/Swift/D; diverges from Go). A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block: fall-through, `return`, `break`/`continue` (Stage 7+), raised error, cancellation. Each `{ ... }` in surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `provide ... in` body, bare block expression. Defers within a block fire LIFO. The body expression is evaluated when the defer *fires*, not at registration; reads of mutable state see scope-exit values.
+`defer` is **block-scoped** — see DEC-012 (matches Zig/Swift/D; diverges from Go). A deferred expression runs at the end of the smallest enclosing `{ ... }`, on every exit path from that block: fall-through, `return`, `break`/`continue` (Stage 7+), raised error, cancellation. Each `{ ... }` in surface syntax is its own defer scope — fn body, `if`/`else` branch, `loop`/`while` body, `try`/`catch` body, `with [ … ]` body, bare block expression. Defers within a block fire LIFO. The body expression is evaluated when the defer *fires*, not at registration; reads of mutable state see scope-exit values.
 
 In the example: `handle`'s defer is in the fn body block, fires as that block exits. `risky`'s defer fires as the fn-body block unwinds via raised error, before the raise reaches `main`'s `try`. A defer inside `try { defer X; raise ... }` would fire as that try-body block exited, *before* `catch` ran.
 
@@ -661,7 +679,7 @@ Activation boundaries (`call_fn`, `DUser` arm of `CapCall`) own *only* the `Retu
 
 -----
 
-## Stage 7 — Assignment and loops
+## Stage 7 — Assignment and loops  ✅ *implemented*
 
 ### Example
 
@@ -755,7 +773,7 @@ Labeled break (`break 'outer`). `for x in iter` is Stage 8 (when arrays land). `
 
 -----
 
-## Stage 8 — Arrays and iteration
+## Stage 8 — Arrays and iteration  ✅ *implemented*
 
 ### Example
 
@@ -784,7 +802,9 @@ fn main() {
 
 Empty array literal `[]` infers element type from context. In the interpreter values are typeless; the type checker enforces uniformity later.
 
-This stage introduces **value-method dispatch** — `xs.len()` is not a capability call. Add a minimal table keyed by host type tag, distinct from `Cap.method(...)`. The parser produces a generic `MethodCall { target; name; args }`; eval branches on the runtime type of `target`.
+This stage introduces **value-method dispatch** — `xs.len()` is not a capability call. Add a minimal table keyed by host type tag, distinct from `Cap.method(...)`. The parser produces a generic `MethodCall { target; name; args }`; eval branches on the runtime type of `target`. *(This dispatch was later generalized to user structs and `impl` values — DEC-020 — so `s.f(args)` works on any value, not just arrays/strings; see Stage 4.)*
+
+The array **type** `[T]` is also accepted in type position (`fn route(table: [Route])`), erased at runtime — it implements the already-documented syntax §Arrays and added no parser conflicts.
 
 ### Interpreter changes
 
@@ -856,7 +876,7 @@ A general `Iterator<T>` trait dispatch. `for` over user-defined iterables. Slici
 
 -----
 
-## Stage 9 — Strings
+## Stage 9 — Strings  ✅ *implemented*
 
 ### Example
 
@@ -913,11 +933,15 @@ Eval: extend the value-method-dispatch table for `VStr`. Implementations are dir
 
 -----
 
-## Stage 10 — Closures
+## Stage 10 — Closures  ✅ *implemented*
 
 ### Example
 
 ```di
+capability Logger { fn info(msg: Str) }
+
+enum RetryError { GiveUp }
+
 fn with_retry(times: I64, action: fn() -> I64) -> I64
     requires {Logger}
     raises   {GiveUp}
@@ -926,16 +950,18 @@ fn with_retry(times: I64, action: fn() -> I64) -> I64
     loop {
         try {
             return action()
-        } catch _ {
-            i = i + 1
-            Logger.info("attempt ${i} failed")
-            if i >= times { raise GiveUp }
+        } catch {
+            _ -> {
+                i = i + 1
+                Logger.info("attempt ${i} failed")
+                if i >= times { raise GiveUp }
+            }
         }
     }
 }
 
 fn main() {
-    provide { Logger = StdoutLogger() @ Process } in {
+    with [ Logger <- StdoutLogger ] @ 'Process {
         let result = with_retry(3, || {
             Logger.info("attempting")
             42
@@ -951,9 +977,11 @@ attempting
 42
 ```
 
+(`catch` takes `pattern -> arm` arms inside braces — `catch { _ -> { … } }` — not `catch _ { … }`. The arm body may itself be a block. A single arm can also be written unbraced: `catch DbError(e) -> raise …`.)
+
 ### What's new
 
-Lambda syntax `|params| body` (and the parenthesised-body form `|params| { ...; expr }`). First-class function values with type `fn(T1, T2) -> R`. Closures capture their lexical environment by reference at the point of definition, **including the capability stack** at that point.
+Lambda syntax `|params| body` (and the braced-body form `|params| { … expr }`, statements newline-separated), plus the zero-arg form `|| body` (DEC-021: `||` lexes as one token; the spaced `| |body` is two `PIPE`s). First-class function values with type `fn(T1, T2) -> R`. Closures capture their lexical environment by reference at the point of definition, **including the capability stack** at that point.
 
 Effect rows on closures are inferred but stored on the value, not statically checked yet. The type checker will consume them later.
 
@@ -1008,7 +1036,7 @@ Eval:
      | _ -> panic "call of non-function")
 ```
 
-The `caps` capture is the load-bearing piece for Stage 11: a closure defined inside a `provide { Logger = ... } in { ... }` block carries the `Logger` binding with it, so when an HTTP server invokes the closure later (outside that lexical block), `Logger` is still resolvable. Add an explicit test where a closure is stored in a `let`, the `provide` block exits, then the closure is invoked from outside — the capability lookup must still succeed.
+The `caps` capture is the load-bearing piece for Stage 11: a closure defined inside a `with [ Logger <- … ] @ 'Process { … }` block carries the `Logger` binding with it, so when an HTTP server invokes the closure later (outside that lexical block), `Logger` is still resolvable. Add an explicit test where a closure is stored in a `let`, the `with` block exits, then the closure is invoked from outside — the capability lookup must still succeed.
 
 Free function names become callable as values: `let f = foo; f(1)` works. Extend the lookup chain in `eval (Var name)` to consult the fns table after env.
 
@@ -1020,16 +1048,16 @@ Row-polymorphic generics (`<R, E>` variables on function types). Polymorphic ide
 
 -----
 
-## Stage 11 — HTTP server and client
+## Stage 11 — HTTP server and client  ✅ *implemented*
 
 ### Example
 
 ```di
 fn main() {
-    provide {
-        Logger     = StdoutLogger()       @ Process
-        HttpServer = BlockingHttpServer() @ Process
-    } in {
+    with [
+        Logger     <- StdoutLogger
+        HttpServer <- BlockingHttpServer
+    ] @ 'Process {
         Logger.info("listening on :8080")
 
         HttpServer.serve(8080, |req| {
@@ -1047,33 +1075,39 @@ fn main() {
 }
 ```
 
-Run with `dilang run service.di`; from another terminal, `curl localhost:8080/health` → `ok`.
+Run with `dilang run service.di`; from another terminal, `curl localhost:8080/health` → `ok`. (The shipped fixtures use port **18080**, not 8080.)
 
 ### What's new
 
 The **first network-facing capability**. Stdlib registers the data types and the host impls register against them.
 
 ```di
-capability HttpServer @ Process {
+capability HttpServer @ 'Process {
     fn serve(port: I64, handler: fn(Request) -> Response)
 }
 
-capability HttpClient @ Process {
+capability HttpClient @ 'Process {
     fn get(url: Str) -> Response                raises {HttpError}
     fn post(url: Str, body: Str) -> Response    raises {HttpError}
 }
 
-struct Request  { method: Str, path: Str, headers: [(Str, Str)], body: Str }
+struct Request  { method: Str, path: Str, body: Str }
 struct Response { status: I64, body: Str }
-enum HttpError { ConnectionFailed(reason: Str); BadStatus(code: I64); InvalidUrl(url: Str) }
+enum HttpError {
+    ConnectionFailed(reason: Str)
+    BadStatus(code: I64)
+    InvalidUrl(url: Str)
+}
 ```
+
+`Request` has **no `headers` field** in v0: header ergonomics are deferred until a tuple/map value model exists (DEC-019). The host parses requests/responses with bodies only (`Content-Length`-gated), no header surface to user code yet.
 
 Host impls landed in this stage:
 
 - `BlockingHttpServer` — single connection at a time. Backed by `Eio.Net.run_server` with `max_connections = 1`. Each request runs the handler closure to completion before the next `accept`. User code sees a blocking model; the host hides the fiber.
 - `BlockingHttpClient` — synchronous `get`/`post`. Backed by `cohttp-eio`, or `Eio.Process` shelling out to `curl` if the cohttp dependency is too heavy in v0. Whichever is faster to land.
 
-Both impls require an `Eio.Switch.t`. Reuse the per-`provide` switch already stashed on the cap_frame (set up in Stage 3, unused until now).
+Both impls require an `Eio.Switch.t`. Reuse the per-`with`-block switch already stashed on the cap_frame (set up in Stage 3, unused until now).
 
 ### Interpreter changes
 
@@ -1083,12 +1117,12 @@ Host stdlib changes:
 
 - Register `Request`, `Response` structs and `HttpError` enum at startup. Use the same path as `Option`/`Some`/`None` from Stage 5 (`ctx.user_constructors` for structs, `ctx.variants` for the enum).
 - Implement `BlockingHttpServer` as a `DHost` impl. The `serve` method:
-  1. Opens (or reuses) the per-`provide` `Eio.Switch.t`.
+  1. Opens (or reuses) the per-`with`-block `Eio.Switch.t`.
   2. Calls `Eio.Net.run_server ~max_connections:1 ~on_error:Logger.error` against an `Eio.Net.listening_socket`.
   3. For each accepted connection: parses HTTP/1.1 request → `Request` struct value, invokes the closure via the same path `Call` uses for `VClosure`, formats the returned `Response`, writes it back.
   4. `Ctrl-C` cancels the switch cleanly — the server's `Eio.Switch.run` unwinds, defers fire, connections close.
 
-The handler closure is a `VClosure` carrying its captured `Logger`. Invoking it from inside the host uses the captured `caps` — exactly what Stage 10 set up. **Verify with a test** that a `provide` outside `HttpServer.serve` is visible inside the handler, and that swapping `StdoutLogger` for a different impl at `main` changes the handler's output with no other code changes.
+The handler closure is a `VClosure` carrying its captured `Logger`. Invoking it from inside the host uses the captured `caps` — exactly what Stage 10 set up. **Verify with a test** that a `with` binding outside `HttpServer.serve` is visible inside the handler, and that swapping `StdoutLogger` for a different impl at `main` changes the handler's output with no other code changes.
 
 ### CLI
 
@@ -1105,7 +1139,7 @@ Once Stage 19 (Tests) lands, an in-process `MockHttpServer` impl makes this herm
 
 ### Deferred
 
-- Per-request scoping (`@ Request` bindings around the handler) — Stage 12.
+- Per-request scoping (`@ 'Request` bindings around the handler) — Stage 12.
 - DB pool with `Lifecycle` start/shutdown — Stage 13.
 - Concurrent request handling (>1 in flight) — Stage 15 swaps `BlockingHttpServer` for `EioHttpServer`.
 - Per-request timeouts — Stage 16.
@@ -1114,7 +1148,7 @@ Once Stage 19 (Tests) lands, an in-process `MockHttpServer` impl makes this herm
 
 -----
 
-## Milestone 11.5 — HTTP service with route table
+## Milestone 11.5 — HTTP service with route table  ✅ *shipped*
 
 No new language features. Ship a complete program at `test/programs/router/service.di` that exercises everything through Stage 11:
 
@@ -1124,7 +1158,7 @@ struct Route { method: Str, prefix: Str, handler: fn(Request) -> Response }
 fn route(req: Request, table: [Route]) -> Response {
     for r in table {
         if req.method == r.method && req.path.starts_with(r.prefix) {
-            return r.handler(req)
+            return (r.handler)(req)
         }
     }
     Response { status: 404, body: "no route" }
@@ -1137,13 +1171,13 @@ fn echo(req: Request) -> Response {
 }
 
 fn main() {
-    provide {
-        Logger     = StdoutLogger()       @ Process
-        HttpServer = BlockingHttpServer() @ Process
-    } in {
+    with [
+        Logger     <- StdoutLogger
+        HttpServer <- BlockingHttpServer
+    ] @ 'Process {
         let table = [
             Route { method: "GET",  prefix: "/health", handler: health },
-            Route { method: "POST", prefix: "/echo",   handler: echo },
+            Route { method: "POST", prefix: "/echo",   handler: echo }
         ]
 
         HttpServer.serve(8080, |req| {
@@ -1154,7 +1188,11 @@ fn main() {
 }
 ```
 
-This is the **first dilang program worth showing someone**. It exercises: closures (handler refs), arrays (route table), strings (path matching, body), structs (`Request`, `Response`, `Route`), capabilities + `provide` (Logger swap), control flow (`for`, `if`, `return`).
+Two grammar points this program turns on, both now implemented:
+- **`(r.handler)(req)`, not `r.handler(req)`.** `Route.handler` holds a `fn(Request) -> Response` value. By the Rust method/field rule (DEC-020) `r.handler(req)` is a *method* call (and errors with a field-vs-method hint); calling a field that holds a function needs the parenthesised general-call form `(r.handler)(req)`.
+- **Short-circuit `&&` (DEC-021)** joins the method and path-prefix tests.
+
+This is the **first dilang program worth showing someone**. It exercises: closures (handler refs), arrays (route table), strings (path matching, body), structs (`Request`, `Response`, `Route`), capabilities + `with` wiring (Logger swap), control flow (`for`, `if`, `return`), and value-method dispatch on the `Route` value.
 
 Add to `dune runtest` as a smoke test: launch the service via `dilang run --max-requests 6`, fire `health` / `echo` / unknown-route / wrong-method requests from a fixture, assert the four responses, wait for clean exit.
 
@@ -1162,14 +1200,14 @@ Goal of this milestone: validate the closure+capability story against a running 
 
 -----
 
-## Stage 12 — Scopes
+## Stage 12 — Scopes  🔜 *next; not yet built*
 
 ### Example
 
 ```di
-scope Request
+scope 'Request under 'Process
 
-capability ReqId @ Request {
+capability ReqId @ 'Request {
     fn get() -> Str
 }
 
@@ -1183,15 +1221,15 @@ fn show_id() requires {ReqId} {
 }
 
 fn main() {
-    provide @ Request {
-        ReqId = StaticReqId { id: "abc-123" } @ Request
-    } in {
+    with [
+        ReqId <- StaticReqId { id: "abc-123" }
+    ] @ 'Request {
         show_id()
     }
 
-    provide @ Request {
-        ReqId = StaticReqId { id: "xyz-789" } @ Request
-    } in {
+    with [
+        ReqId <- StaticReqId { id: "xyz-789" }
+    ] @ 'Request {
         show_id()
     }
 }
@@ -1203,25 +1241,25 @@ request: abc-123
 request: xyz-789
 ```
 
-Each `provide @ Request` creates a fresh frame; the bindings are local to it.
+Each `with [ … ] @ 'Request` creates a fresh frame; the bindings are local to it.
 
 ### What's new
 
-`scope X` top-level declaration, `@ X` scope annotation on capability declarations and on bindings, `provide @ X { ... } in { ... }`. Re-entering `provide @ X` per call yields a fresh instance.
+`scope 'X under 'Parent` top-level declaration (RFC-001 §1.1: lifetime names are apostrophe-prefixed, nesting via `under`), `@ 'X` scope annotation on capability declarations and on bindings, `with [ … ] @ 'X { … }`. Re-entering the `with` block per call yields a fresh instance. Bindings without an explicit `@` inherit the block's `'X`.
 
 ### Interpreter changes
 
 AST:
 
 ```ocaml
-type decl = ... | DScope of ident
+type decl = ... | DScope of { name : lifetime; parent : lifetime option }
 
-type cap_decl = { ...; scopes : ident list }   (* [] = any *)
+type cap_decl = { ...; scope : lifetime option }   (* None = any *)
 
-(* Provide already has `scope : ident option` from Stage 3 *)
+(* WithCaps already carries `scope : lifetime option` and per-entry scopes from Stage 3 *)
 ```
 
-Eval: nothing fundamentally new — `Provide` already constructs a frame tagged with the scope name (Stage 3 left it as `"Process"` if absent). The scope tag is recorded in the frame; v0 doesn't enforce scope-escape checks (that's the type checker's job).
+Eval: nothing fundamentally new — `WithCaps` already constructs a frame tagged with the scope name (Stage 3 left it as `"'Process"` if absent). The scope tag is recorded in the frame; v0 doesn't enforce scope-escape checks (that's the type checker's job).
 
 Lookup is unchanged: capability resolution walks frames outside-in regardless of scope tag. The scope tag is *informational* in v0 — used by the type checker, observable in error messages.
 
@@ -1240,18 +1278,18 @@ type expr = ... | StructLit of { ty : type_name; fields : (ident * expr) list; s
 
 ### Deferred
 
-Static enforcement that a `@ Request`-scoped capability isn't bound or used outside a Request scope. v0 lets it slide; the type checker enforces (§4.1.3).
+Static enforcement that a `@ 'Request`-scoped capability isn't bound or used outside a `'Request` scope. v0 lets it slide; the type checker enforces (§4.1.3).
 
 -----
 
-## Stage 13 — Lifecycle
+## Stage 13 — Lifecycle  ⏳ *planned; not yet built*
 
 ### Example
 
 ```di
-scope Transaction
+scope 'Transaction under 'Process
 
-capability DbConn @ Transaction {
+capability DbConn @ 'Transaction {
     fn execute(sql: Str)
 }
 
@@ -1274,18 +1312,18 @@ impl Lifecycle for PgConn {
 }
 
 fn transfer() raises {AppError} {
-    provide @ Transaction {
-        DbConn = PgConn {} @ Transaction
-    } in {
+    with [
+        DbConn <- PgConn
+    ] @ 'Transaction {
         DbConn.execute("UPDATE x SET y = 1")
         // normal exit → COMMIT
     }
 }
 
 fn fail() raises {AppError} {
-    provide @ Transaction {
-        DbConn = PgConn {} @ Transaction
-    } in {
+    with [
+        DbConn <- PgConn
+    ] @ 'Transaction {
         DbConn.execute("UPDATE x SET y = 1")
         raise BadInput("nope")
     }
@@ -1296,6 +1334,8 @@ fn main() {
     try fail() catch BadInput(_) -> print("caught")
 }
 ```
+
+(`PgConn` is fieldless, so it constructs bare — `PgConn`, not `PgConn {}` — per DEC-009.)
 
 Expected:
 ```
@@ -1310,7 +1350,7 @@ caught
 
 ### What's new
 
-`Lifecycle` trait — `start()` and `shutdown(exit: ExitReason)`. Detected on impl values when they're bound in a `provide` block. Runs on entry/exit in topological order of `start.requires`, with ties broken by lexical order (design §3.6.3). Started impls roll back in reverse on partial-start failure (§3.6.4).
+`Lifecycle` trait — `start()` and `shutdown(exit: ExitReason)`. Detected on impl values when they're bound in a `with` block. Runs on entry/exit in topological order of `start.requires`, with ties broken by lexical order (design §3.6.3). Started impls roll back in reverse on partial-start failure (§3.6.4).
 
 `ExitReason` is a stdlib enum: `Normal | Raised(Error) | Panicked`.
 
@@ -1330,10 +1370,10 @@ type lifecycle = {
 type impl_value = { ...; lifecycle : lifecycle option }
 ```
 
-Eval — extend `eval_provide_block`:
+Eval — extend `eval_with_block`:
 
 ```ocaml
-let eval_provide_block ctx ~scope ~entries ~body =
+let eval_with_block ctx ~scope ~entries ~body =
   Eio.Switch.run @@ fun sw ->
     let bindings = build_bindings ctx ~sw ~scope entries in
     let order = topo_sort_starts bindings in
@@ -1368,29 +1408,26 @@ Per-scope-instance Lifecycle cost analysis (design §5.8). The interpreter runs 
 
 -----
 
-## Stage 14 — Wiring values
+## Stage 14 — Wiring values  ⏳ *planned; not yet built*
 
 ### Example
 
 ```di
-fn dev_runtime() -> Wiring {
-    provide {
-        Logger = StdoutLogger() @ Process
-    }
-}
+fn dev_runtime() -> Wiring = with [
+    Logger <- StdoutLogger @ 'Process
+]
 
-fn dev_repos() -> Wiring {
-    provide {
-        Greeter = PrefixedGreeter() @ Process
-        Stamper = ExclaimStamper() @ Process
-    }
-}
+fn dev_repos() -> Wiring = with [
+    Greeter <- PrefixedGreeter @ 'Process
+    Stamper <- ExclaimStamper  @ 'Process
+]
 
 fn main() {
-    provide {
-        using dev_runtime(), dev_repos(),
-        Stamper = QuietStamper() @ Process,         // overrides dev_repos's Stamper
-    } in {
+    with [
+        ...dev_runtime()
+        ...dev_repos()
+        Stamper <- QuietStamper @ 'Process         // overrides dev_repos's Stamper
+    ] {
         Greeter.say("hello")
     }
 }
@@ -1400,18 +1437,18 @@ Assuming `QuietStamper.stamp(m) -> m`, output is `hello`.
 
 ### What's new
 
-`provide { ... }` with no `in` produces a `Wiring` value. `using w1, w2` splats Wirings into the enclosing provide. Lexical order determines override; later wins (syntax §7).
+`with [ … ]` with no body produces a `Wiring` value (RFC-001 §1.5). `...wiring_expr` splices a Wiring's entries into the enclosing `with` at that lexical position (RFC-001 §1.4), replacing the old `using`. Lexical order determines override; later wins (syntax §7). A bodyless mixed-scope `with [ … ]` requires every direct binding to carry `@ 'Scope`; a bodyless `with [ … ] @ 'Scope` defaults its direct bindings to `'Scope`.
 
 ### Interpreter changes
 
-AST already has `Provide { body = None }` and `Using of expr list` from Stage 3 / earlier — we just hadn't given them eval semantics.
+AST already has `WithCaps { body = None }` and `Spread of expr` entries from Stage 3 (RFC-001) — we just hadn't given them eval semantics.
 
 Value: `VWiring of wiring`.
 
 ```ocaml
 type wiring = {
-  default_scope : ident;
-  entries       : (ident * Ast.expr * ident) list;  (* (cap, rhs, scope) *)
+  default_scope : lifetime;
+  entries       : (ident * Ast.expr * lifetime option) list;  (* (cap, rhs, scope) *)
   ctx_at_construction : ctx;
 }
 ```
@@ -1419,32 +1456,30 @@ type wiring = {
 Eval:
 
 ```ocaml
-| Provide { entries; scope; body = None } ->
+| WithCaps { entries; scope; body = None } ->
     VWiring {
-      default_scope = Option.value scope ~default:"Process";
+      default_scope = Option.value scope ~default:"'Process";
       entries = entries |> List.filter_map (function
         | Binding { cap; rhs; scope } -> Some (cap, rhs, scope)
-        | Using _ -> failwith "using inside Wiring-producing provide isn't legal at v0");
+        | Spread _ -> failwith "nested spread inside a Wiring-producing `with` isn't legal at v0");
       ctx_at_construction = ctx;
     }
 ```
 
-In `eval_provide_block`, flatten entries before processing:
+In `eval_with_block`, flatten entries before processing:
 
 ```ocaml
 let flatten_entries ctx entries =
   List.concat_map (function
     | Binding { cap; rhs; scope } -> [(cap, rhs, scope, ctx)]
-    | Using ws ->
-        List.concat_map (fun w_expr ->
-          match eval ctx w_expr with
-          | VWiring w -> List.map (fun (c, r, s) -> (c, r, s, w.ctx_at_construction)) w.entries
-          | _ -> panic "using requires a Wiring value")
-          ws
+    | Spread w_expr ->
+        (match eval ctx w_expr with
+         | VWiring w -> List.map (fun (c, r, s) -> (c, r, s, w.ctx_at_construction)) w.entries
+         | _ -> panic "... spread requires a Wiring value")
   ) entries
 ```
 
-A spliced binding's RHS is evaluated against the *captured* `ctx_at_construction`, except its `cap_env` is whatever the enclosing provide has built so far (which is the standard rule). The captured ctx supplies value-environment names that the Wiring function referenced.
+A spliced binding's RHS is evaluated against the *captured* `ctx_at_construction`, except its `cap_env` is whatever the enclosing `with` has built so far (which is the standard rule). The captured ctx supplies value-environment names that the Wiring function referenced.
 
 Lexical override: `built := (cap, impl) :: !built` always appends. Lookup walks the bindings list back-to-front; later entry wins.
 
@@ -1454,16 +1489,24 @@ Static "same binding set on every call" check (DEC-003) — type-checker phase. 
 
 -----
 
-## Milestone 14.5 — Service with `@ Request`, DB pool, dev/test/prod wirings
+## Milestone 14.5 — Service with `@ 'Request`, DB pool, dev/test/prod wirings  ⏳ *planned; not yet built*
 
 No new language features. Extend the Stage 11.5 router service to use everything from Stages 12–14:
 
 ```di
-scope Request
+scope 'Request under 'Process
 
-capability RequestId @ Request { fn get() -> Str }
-capability ReqLogger @ Request { fn info(msg: Str); fn error(msg: Str) }
-capability TaskDb    @ Process { fn list_open() -> [Task]; fn create(title: Str) -> Task }
+capability RequestId @ 'Request {
+    fn get() -> Str
+}
+capability ReqLogger @ 'Request {
+    fn info(msg: Str)
+    fn error(msg: Str)
+}
+capability TaskDb @ 'Process {
+    fn list_open() -> [Task]
+    fn create(title: Str) -> Task
+}
 
 struct PgTaskDb { pool: ConnPool }
 impl TaskDb for PgTaskDb { ... }
@@ -1472,29 +1515,25 @@ impl Lifecycle for PgTaskDb {
     fn shutdown(_: ExitReason)  { self.pool.drain() }
 }
 
-fn prod_runtime() -> Wiring {
-    provide {
-        Logger     = JsonLogger()                   @ Process
-        TaskDb     = PgTaskDb { pool: ConnPool.new(env("DATABASE_URL"), 16) } @ Process
-        HttpServer = BlockingHttpServer()           @ Process
-    }
-}
+fn prod_runtime() -> Wiring = with [
+    Logger     <- JsonLogger                                              @ 'Process
+    TaskDb     <- PgTaskDb { pool: ConnPool.new(env("DATABASE_URL"), 16) } @ 'Process
+    HttpServer <- BlockingHttpServer                                      @ 'Process
+]
 
-fn test_runtime() -> Wiring {
-    provide {
-        Logger     = TestLogger()                   @ Process
-        TaskDb     = InMemoryTaskDb()               @ Process
-        HttpServer = MockHttpServer()               @ Process
-    }
-}
+fn test_runtime() -> Wiring = with [
+    Logger     <- TestLogger     @ 'Process
+    TaskDb     <- InMemoryTaskDb @ 'Process
+    HttpServer <- MockHttpServer @ 'Process
+]
 
 fn main() {
-    provide { using prod_runtime() } in {
+    with [ ...prod_runtime() ] {
         HttpServer.serve(8080, |req| {
-            provide @ Request {
-                RequestId = RandomRequestId()                    @ Request
-                ReqLogger = PrefixedLogger { prefix: RequestId.get() } @ Request
-            } in {
+            with [
+                RequestId <- RandomRequestId
+                ReqLogger <- PrefixedLogger { prefix: RequestId.get() }
+            ] @ 'Request {
                 route(req)
             }
         })
@@ -1505,7 +1544,7 @@ fn main() {
 Goals:
 
 - `Lifecycle.start` warms the pool once at process start; `Lifecycle.shutdown` drains it on `Ctrl-C`. Add a `defer` in `main` and a test that asserts the pool's connection count drops to zero on exit.
-- `@ Request` bindings are fresh per incoming request. `RequestId` is a UUID; `ReqLogger` prefixes log lines with it. Two concurrent requests (mocked) show interleaved logs with distinct prefixes.
+- `@ 'Request` bindings are fresh per incoming request. `RequestId` is a UUID; `ReqLogger` prefixes log lines with it. Two concurrent requests (mocked) show interleaved logs with distinct prefixes.
 - Swapping `prod_runtime()` for `test_runtime()` at `main` changes nothing else in the program. Run the same handler logic under both; assert the test variant produces deterministic output.
 
 This is the milestone where dilang's claims about DI become demonstrable on a running backend service, not on paper. It also exposes the seams where the next stages must work — concurrent request handling (Stage 15), per-request timeouts (Stage 16), streaming responses (Stage 17).
@@ -1514,15 +1553,15 @@ Ship under `test/programs/task_service/`. Three sub-targets: `service.di` (the p
 
 -----
 
-## Stage 15 — Concurrency via IO
+## Stage 15 — Concurrency via IO  ⏳ *planned; not yet built*
 
 ### Example
 
 ```di
 fn main() {
-    provide {
-        IO = FiberRuntime(workers: 2) @ Process
-    } in {
+    with [
+        IO <- FiberRuntime { workers: 2 }
+    ] @ 'Process {
         let f1 = IO.spawn(|| {
             IO.sleep(100.millis)
             42
@@ -1563,7 +1602,7 @@ type value =
   | VDur    of float                    (* seconds *)
 ```
 
-Eio threading: every call needs the *current* `Eio.Switch.t`. Until now we've been opening a switch in `Provide` and stashing it in the frame, but we haven't threaded "current switch" through host calls. Add `ctx.sw : Eio.Switch.t` and use the innermost `provide` frame's switch (or, for `IO.spawn`, the `Process` switch since spawned fibers should outlive `Request` scopes).
+Eio threading: every call needs the *current* `Eio.Switch.t`. Until now we've been opening a switch in the `with` block and stashing it in the frame, but we haven't threaded "current switch" through host calls. Add `ctx.sw : Eio.Switch.t` and use the innermost `with`-block frame's switch (or, for `IO.spawn`, the `'Process` switch since spawned fibers should outlive `'Request` scopes).
 
 Host stdlib:
 
@@ -1580,21 +1619,21 @@ Host stdlib:
 
 -----
 
-## Stage 16 — Cancellation
+## Stage 16 — Cancellation  ⏳ *planned; not yet built*
 
 ### Example
 
 ```di
 fn main() {
-    provide { IO = FiberRuntime() @ Process } in {
-        try with_timeout(50.millis) {
+    with [ IO <- FiberRuntime ] @ 'Process {
+        try with_timeout(50.millis, || {
             IO.sleep(500.millis)
             print("never prints")
-        } catch Timeout -> print("timed out")
+        }) catch Timeout -> print("timed out")
 
         let result = IO.with_cancel(|tok| {
-            let winner = IO.spawn(|| { IO.sleep(20.millis); "fast" })
-            let loser  = IO.spawn(|| { IO.sleep(200.millis); "slow" })
+            let winner = IO.spawn(|| { IO.sleep(20.millis)  "fast" })
+            let loser  = IO.spawn(|| { IO.sleep(200.millis) "slow" })
             let w = winner.await()
             tok.trip()              // cancels loser
             w
@@ -1618,7 +1657,7 @@ winner: fast
 
 ### What's new
 
-`IO.with_cancel(|tok| { ... })`, `tok.trip()`, the `Cancelled` error, `uncancellable { ... }`, `with_timeout(d, action)` (stdlib helper, not a primitive — syntax §15.2). `select { arm; arm }` for racing.
+`IO.with_cancel(|tok| { ... })`, `tok.trip()`, the `Cancelled` error, `uncancellable { ... }`, `with_timeout(d, action)` (stdlib helper, not a primitive — syntax §15.2). `select { arm, arm }` for racing (arms comma/newline-separated, never `;`).
 
 ### Interpreter changes
 
@@ -1652,7 +1691,10 @@ Host stdlib:
       requires {IO} raises {Timeout}
   {
       IO.with_cancel(|tok| {
-          IO.spawn(|| { IO.sleep(d); tok.trip() })
+          IO.spawn(|| {
+              IO.sleep(d)
+              tok.trip()
+          })
           action()
       })
   }
@@ -1666,7 +1708,7 @@ Fine-grained cancellation policy choices, structured concurrency lints. The Eio 
 
 -----
 
-## Stage 17 — Streams
+## Stage 17 — Streams  ⏳ *planned; not yet built*
 
 ### Example
 
@@ -1770,17 +1812,17 @@ A general `Iterator<T>` trait so user types can implement iteration. `stream`-of
 
 -----
 
-## Stage 18 — Stdin and filesystem capabilities
+## Stage 18 — Stdin and filesystem capabilities  ⏳ *planned; not yet built*
 
 ### Example
 
 ```di
 fn main() {
-    provide {
-        Logger      = StdoutLogger() @ Process
-        StdinReader = RealStdin()    @ Process
-        FsRead      = RealFs()       @ Process
-    } in {
+    with [
+        Logger      <- StdoutLogger
+        StdinReader <- RealStdin
+        FsRead      <- RealFs
+    ] @ 'Process {
         let path = StdinReader.line() ?? "/etc/hostname"
         try {
             let contents = FsRead.read_to_string(path)
@@ -1796,17 +1838,17 @@ fn main() {
 The capabilities a backend service actually needs alongside HTTP:
 
 ```di
-capability StdinReader @ Process {
+capability StdinReader @ 'Process {
     fn line() -> Str?                         // None on EOF
     fn read_to_end() -> Str
 }
 
-capability FsRead @ Process {
+capability FsRead @ 'Process {
     fn read_to_string(path: Str) -> Str       raises {FileNotFound, IoError}
     fn exists(path: Str) -> Bool
 }
 
-capability FsWrite @ Process {
+capability FsWrite @ 'Process {
     fn write_string(path: Str, body: Str)     raises {IoError}
     fn append_string(path: Str, body: Str)    raises {IoError}
 }
@@ -1842,7 +1884,7 @@ Directory walks, file watching, permissions, symlinks. Add as demos demand. Asyn
 
 -----
 
-## Stage 19 — Tests as a top-level form
+## Stage 19 — Tests as a top-level form  ⏳ *planned; not yet built*
 
 ### Example
 
@@ -1852,24 +1894,26 @@ test "arithmetic adds" {
 }
 
 test "stamper exclaims" {
-    provide {
-        Stamper = ExclaimStamper() @ Process
-    } in {
+    with [
+        Stamper <- ExclaimStamper
+    ] @ 'Process {
         assert Stamper.stamp("hi") == "hi!"
     }
 }
 
 test "transaction commits on normal exit" {
-    let log = TestLogger()
-    provide {
-        Logger = log              @ Process
-        WriteDb = TestWriteDb()   @ Process
-    } in {
+    let log = TestLogger
+    with [
+        Logger  <- log
+        WriteDb <- TestWriteDb
+    ] @ 'Process {
         transfer()                // assume defined in scope
         assert log.contains("COMMIT")
     }
 }
 ```
+
+(A test can also bind a full Wiring with the expression form — `test "name" = with [ ...test_wiring() ] { … }`; see RFC-001 §5.4.)
 
 CLI:
 ```
@@ -1921,7 +1965,7 @@ Out of scope for the interpreter milestones. The same AST feeds it. It enforces 
 - Lifecycle cycle detection (§4.1.6)
 - Forward-reference rejection (§4.1.7)
 - Trait bound satisfaction (§4.1.10)
-- Impl-private requires resolved at the `provide` site (§3.1.4)
+- Impl-private requires resolved at the `with` site (§3.1.4)
 
 The interpreter doesn't get retired by the checker — together they form the front end.
 
@@ -1938,6 +1982,7 @@ The shape of the codebase after all stages land. Per-stage sections show the *de
 
 type ident = string
 type type_name = string
+type lifetime = string                 (* apostrophe-prefixed scope name, e.g. "'Process" (RFC-001) *)
 
 type literal =
   | LInt    of int64
@@ -1960,7 +2005,8 @@ type expr =
   (* Stage 3–4 *)
   | CapCall      of { cap : ident; method_ : ident; args : expr list }
   | MethodCall   of { recv : expr; name : ident; args : expr list }
-  | Provide      of { entries : provide_entry list; scope : ident option;
+  (* RFC-001: `with [ entries ] @ 'Scope { body }` (formerly `Provide`) *)
+  | WithCaps     of { entries : with_entry list; scope : lifetime option;
                       body : expr option }
   | StructLit    of { ty : type_name; fields : (ident * expr) list;
                       spread : expr option }
@@ -1969,6 +2015,9 @@ type expr =
   | Raise        of { variant : ident; payload : expr list }
   | Try          of { body : expr; arms : (pattern * expr) list }
   | NullCoalesce of expr * expr
+  (* Stage 5 / DEC-021: short-circuit operators are their own nodes, not BinOp *)
+  | And          of expr * expr
+  | Or           of expr * expr
   | OptChain     of { recv : expr; name : ident }
   | OptCall      of { recv : expr; name : ident; args : expr list }
   | EnumLit      of { ty : type_name option; tag : string; args : expr list }
@@ -1998,9 +2047,9 @@ type expr =
 
 and string_part = SLit of string | SInterp of expr
 
-and provide_entry =
-  | Binding of { cap : ident; rhs : expr; scope : ident }
-  | Using   of expr list
+and with_entry =
+  | Binding of { cap : ident; rhs : expr; scope : lifetime option }  (* Cap <- rhs [@ 'Scope] *)
+  | Spread  of expr                                                  (* ...wiring_expr *)
 
 and pattern =
   | PWild
@@ -2016,7 +2065,7 @@ type decl =
   | DImpl   of impl_decl
   | DStruct of struct_decl
   | DEnum   of enum_decl
-  | DScope  of ident                                   (* Stage 12 *)
+  | DScope  of { name : lifetime; parent : lifetime option }   (* Stage 12: `scope 'X under 'Parent` *)
   | DType   of { name : ident; def : ty }
   | DTest   of { name : string; body : expr }          (* Stage 19 *)
 
@@ -2077,8 +2126,8 @@ and lifecycle = {
 and exit_reason = ExNormal | ExRaised of dilang_error | ExPanicked
 
 and wiring = {
-  default_scope        : ident;
-  entries              : (ident * Ast.expr * ident) list;
+  default_scope        : lifetime;
+  entries              : (ident * Ast.expr * lifetime option) list;
   ctx_at_construction  : ctx;
 }
 ```
@@ -2096,7 +2145,7 @@ type env = {
 and cap_env = cap_frame list                (* innermost first *)
 
 and cap_frame = {
-  scope    : ident;                          (* "Process", "Request", ... *)
+  scope    : lifetime;                        (* "'Process", "'Request", ... *)
   bindings : (ident * impl_value) list;     (* lexical order; later wins *)
   switch   : Eio.Switch.t;                  (* this frame's switch *)
 }
@@ -2144,8 +2193,8 @@ val call_fn  : ctx -> fn_value -> value list -> value
 val dispatch : ctx -> impl_value -> string -> value list -> value
 
 (* lib/semantics/lifecycle.mli *)
-val eval_provide_block :
-  ctx -> scope:ident option -> entries:Ast.provide_entry list ->
+val eval_with_block :
+  ctx -> scope:lifetime option -> entries:Ast.with_entry list ->
   body:Ast.expr -> value
 
 val topo_sort_starts :
@@ -2189,7 +2238,7 @@ let () =
 
 ### Sizing
 
-Rough lines-of-code estimate when all 14 stages are done:
+Rough lines-of-code estimate when all 19 stages are done:
 
 | Area                       | LoC (rough)                  |
 |----------------------------|------------------------------|
@@ -2208,51 +2257,40 @@ Most of that lives in the host stdlib, not the interpreter core. The interpreter
 
 ## Cross-cutting: project layout
 
+The originally-sketched layout below was a nested `syntax/semantics/runtime/stdlib`
+tree. **What actually landed is a flat `lib/`** (no subdirectories) — the modules
+are small enough that nesting earned nothing:
+
 ```
-dilang-interpreter/                       (* new folder at the repo root, alongside dilang-zed/ *)
+dilang-interpreter/                       (* folder at the repo root, alongside dilang-zed/ *)
   dune-project
   dilang.opam
   bin/
-    main.ml                               (* CLI: run / test subcommands *)
+    main.ml                               (* CLI entry; thin wrapper over Driver *)
   lib/
-    syntax/
-      ast.ml                              (* grows with stages *)
-      ast.mli
-      parser.ml                           (* tree-sitter → AST *)
-      pretty.ml                           (* debugging printer *)
-    semantics/
-      env.ml                              (* values + cap_env *)
-      value.ml                            (* runtime value sum *)
-      error.ml                            (* Dilang_error, Cancelled, Panic *)
-      resolve.ml                          (* name resolution, cap-vs-value disambig *)
-      lifecycle.ml                        (* topo sort + on_release wiring *)
-      eval.ml                             (* the tree walker *)
-    runtime/
-      sched.ml                            (* ctx, Eio Switch plumbing *)
-      stream.ml                           (* stream/yield/for *)
-      defer.ml                            (* per-activation defer stack *)
-      cancel.ml                           (* Cancellation tokens *)
-    stdlib/
-      logger.ml                           (* StdoutLogger, JsonLogger, TestLogger *)
-      clock.ml                            (* SystemClock, FixedClock *)
-      io.ml                               (* FiberRuntime, TestIO *)
-      id.ml                               (* UuidV7Gen, SeqIdGen *)
-      sync.ml                             (* Mutex *)
-      group.ml                            (* Group<R, E> *)
-      duration.ml                         (* Duration, 100.millis sugar *)
-      register.ml                         (* constructor table *)
+    ast.ml                                (* AST; grows with stages *)
+    lexer.ml                              (* sedlex lexer *)
+    parser.mly                            (* Menhir grammar; parser.conflicts is the conflict budget *)
+    eval.ml                               (* the tree walker: eval, call_value, call_impl_method, value_method_dispatch *)
+    env.ml                                (* values + cap_env *)
+    value.ml                              (* runtime value sum (VImpl, VInt, VEnum, …) *)
+    driver.ml                             (* parse → run; run_file ~max_requests *)
+    host_builtin.ml                       (* StdoutLogger + Stage-11 HTTP host impls *)
+    http_codec.ml                         (* HTTP/1.1 request/response read/write *)
+    prelude.ml                            (* always-registered host capabilities/impls *)
+    string_util.ml                        (* split-on-substring etc. *)
   test/
-    playground/                           (* link of ../dilang/playground *)
-    stages/                               (* the per-stage .di examples in this plan *)
-    run_test.ml                           (* alcotest runner *)
+    stages/                               (* per-stage .di fixtures *)
+    programs/                             (* router/, http_hello/ demos *)
     expect/                               (* per-program expected stdout *)
+    run_test.ml                           (* alcotest runner (incl. fork-based HTTP fixture) *)
 ```
 
-Single dune project. Direct deps: `eio_main`, `eio_mock`, `tree-sitter`, `tree-sitter-dilang` (pinned via opam from the sister repo). Dev deps: `alcotest`.
+Single dune project. Direct deps: `menhirLib`, `sedlex` (`sedlex.ppx` preprocessor), `eio`, `eio_main`. Dev deps: `alcotest`. Resolve/lifecycle/stream/cancel are not yet separate modules — that work lives in `eval.ml`/`driver.ml` or is unbuilt (Stages 13/16/17).
 
 ### Parser choice
 
-Use the tree-sitter grammar in `tree-sitter-dilang` via OCaml bindings, converting tree-sitter parse trees to our AST. The grammar is the canonical source; duplicating it in Menhir invites drift. Fallback if tree-sitter integration is rough: Menhir + sedlex, ~600 lines.
+**Implemented with Menhir + sedlex** (`lib/parser.mly`, `lib/lexer.ml`). An earlier draft of this plan proposed tree-sitter (`tree-sitter-dilang` via OCaml bindings) as primary with Menhir as the fallback; the project took the fallback. The committed grammar carries a deliberate conflict budget tracked in `lib/parser.conflicts` (currently **14** shift/reduce states, all resolved by default-shift) — `diff` against it on every grammar change.
 
 -----
 
@@ -2296,12 +2334,18 @@ Things explicitly *not* on the critical path: `Postgres`, `HttpClient`, `TokenSi
 
 ## Open questions
 
-1. **Tree-sitter binding ergonomics.** The OCaml `tree-sitter` package is thin. If AST translation is tedious, switching to Menhir is a real alternative. Decide after Stage 1.
+1. ~~**Tree-sitter binding ergonomics.**~~ *Resolved:* the interpreter uses **Menhir + sedlex** (`lib/parser.mly`, `lib/lexer.ml`), not tree-sitter. The committed grammar tracks its conflict budget in `lib/parser.conflicts`.
 2. **Wiring "same binding set" invariant (DEC-003).** v0 trusts; type checker enforces.
 3. **`select` semantics for already-resolved arms.** Syntax §15.4 says "first arm to fire." If a promise is already resolved at select entry, short-circuit without forking. Worth detecting.
 4. **`ExitReason.Panicked` vs `ExitReason.Raised`.** Rule: `Panic _ → Panicked`; `Dilang_error _ → Raised(_)`; everything else → `Normal`. Document at the Lifecycle boundary.
 5. **`sql"..."` literals.** Parser surfaces as a Sql/StringInterp variant. Host stdlib treats as opaque struct until a backend impl needs them.
 6. **Numeric type unification.** `I64`/`U64`/`U32`/`F64` collapse to `VInt`/`VFloat` in v0. The type checker keeps them distinct.
+7. **The trait system — design not yet settled.** Traits would be a named interface resolved by *receiver value* (distinct from `capability`, resolved through `with`). The runtime mechanism is already in place (value-method dispatch, DEC-020); the open design questions are surface-level and semantic, not implementation:
+   - **Keyword/parser/AST.** No `trait` keyword exists yet; the lexer/parser/eval have no path for it (only `capability`). Inherent impls (DEC-022) cover a type's *own* methods; a trait is the *named, shared* interface form.
+   - **Resolution & coherence.** How an `impl Trait for T` is found by receiver, and whether overlapping/orphan impls are allowed. Capabilities sidestep this by being resolved explicitly at the `with` site.
+   - **`Self`, default bodies, `extends`.** syntax.md §3 sketches `trait Ord extends Eq`, `Self`-typed params, and default method bodies — none of that is pinned down or implemented.
+   - **Bounds vs. rows.** Traits appear as constraints on generic parameters (syntax §8), not in `requires` rows. The interaction with the (also-deferred) row-polymorphic generics is unresolved.
+   - **Relationship to capabilities.** Whether `trait` and `capability` stay two constructs or eventually unify. Write a DEC when the shape is chosen; until then, value types use inherent impls.
 
 -----
 
@@ -2310,7 +2354,7 @@ Things explicitly *not* on the critical path: `Postgres`, `HttpClient`, `TokenSi
 Cut a single PR:
 
 - dune project skeleton, opam file, CI hello-world.
-- Tree-sitter parser wired up; produces AST for the Stage 1 `.di` file.
+- Menhir + sedlex parser wired up; produces AST for the Stage 1 `.di` file.
 - Eval implements: `Lit`, `Var`, `Let`, `Block`, `BinOp`, `Call` to the `print` intrinsic.
 - CLI: `dilang run stages/01_arith.di` prints `30 / done` and exits 0.
 - An `alcotest` suite that compares stdout to an `expect/` file per stage.

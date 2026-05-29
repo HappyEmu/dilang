@@ -38,6 +38,18 @@ A function declaration has shape:
 { body }
 ```
 
+A function whose body is a single expression may use the **expression-body form**
+`= expr` in place of the `{ body }` block. This pairs naturally with a `with`
+expression (RFC-001 §1.5):
+
+```di
+fn answer() -> I64 = 42
+
+fn prod_runtime() -> Wiring = with [
+    Logger <- JsonLogger @ 'Process
+]
+```
+
 The two effect-row clauses are optional and default to `{}`. `pub` is a row-checking modifier (see §3.2.4 of design): declared rows must match the body exactly. Non-`pub` functions infer their rows.
 
 Call sites pass arguments positionally. A named-arguments rule was considered (DEC-010, deferred); revisit alongside the typechecker.
@@ -71,6 +83,15 @@ spells out its full signature inline:
 
 ```di
 let mul = |x: I64, y: I64| -> I64 { x * y }
+```
+
+A zero-argument closure is written `|| body` — the `||` is lexed as a single token
+(DEC-021), so it does not collide with the `||` operator by context. (A literal
+two-bar sequence with a space, `| |body`, is not the zero-arg form.)
+
+```di
+let make = || Logger.info("built")
+let f    = || { let x = 1  x + 1 }        // braced body, statements newline-separated
 ```
 
 Closures infer rows from their bodies. When stored or passed, the inferred rows appear on the function type.
@@ -156,6 +177,14 @@ A `WriteDb` impl satisfies a `ReadDb` requirement.
 -----
 
 ## 3. Traits
+
+> **Status: provisional — design not yet settled, not implemented.** The shape below
+> is a candidate, not a committed design. No `trait` keyword, parser rule, or eval
+> path exists yet; only `capability` is implemented as an interface decl, and a
+> type's own methods use inherent impls (§4.2, DEC-022). Open questions —
+> resolution/coherence, `Self`, default bodies, interaction with generic bounds and
+> rows, and whether `trait` and `capability` ultimately unify — are tracked in the
+> interpreter plan's Open Questions. Treat this section as a sketch until a DEC lands.
 
 Traits and capabilities share syntactic shape but differ in resolution: traits resolve by receiver value, capabilities resolve through `with` blocks.
 
